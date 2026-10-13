@@ -1,42 +1,48 @@
 import json
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 from app.audit.service import audit_service
 from app.db.connection import get_db_cursor
 from app.db.repository import scan_record_repo
+from app.engine.file_extractor import (
+    MAX_FILE_SIZE_BYTES,
+    FileExtractionError,
+    extract_file_content,
+    sanitize_filename,
+)
 from app.engine.orchestrator import engine
-from app.engine.schemas import ScanOptions, ScanRequest, ScanResponse
+from app.engine.schemas import ScanOptions, ScanRequest, ScanResponse, SeverityLevel
 from app.policy.engine import policy_engine
 from app.policy.risk_scorer import risk_scorer
-from app.policy.schemas import PolicyAction, SharingContext
+from app.policy.schemas import (
+    DataClassification,
+    DestinationType,
+    PolicyAction,
+    RecipientType,
+    SharingContext,
+)
 
 router = APIRouter(prefix="/v1/scan", tags=["Detection & Redaction"])
 
 
-@router.post(
-    "/text",
-    response_model=ScanResponse,
-    summary="Scan and Redact Sensitive Content",
-    description="Deterministic detection, position-aware redaction, policy evaluation, composite risk scoring, and tamper-evident audit logging.",
-)
-async def scan_text_payload(request: ScanRequest) -> ScanResponse:
-    """Scans raw input text, detects sensitive entities, evaluates policy rules,
-    computes composite risk scores, and appends a SHA-256 hash-chained audit record.
+async def _execute_scan_pipeline(
+    text: str,
+    ctx: SharingContext,
+    scan_options: ScanOptions,
+    source_meta: Optional[Dict[str, Any]] = None,
+) -> ScanResponse:
+    """Core deterministic scanning, policy evaluation, risk scoring, AI context analysis,
+    and atomic SHA-256 chained audit persistence. Shared by both text and file endpoints.
     """
-    # Parse explicit sharing context if provided, otherwise apply default
-    if request.context:
-        if isinstance(request.context, dict):
-            ctx = SharingContext(**request.context)
-        elif isinstance(request.context, SharingContext):
-            ctx = request.context
-        else:
-            ctx = SharingContext()
-    else:
-        ctx = SharingContext()
+    source_meta = source_meta or {"source_type": "text"}
+    source_type = source_meta.get("source_type", "text")
+    filename = source_meta.get("filename")
+    file_size_bytes = source_meta.get("file_size_bytes")
+    extraction_note = source_meta.get("extraction_note")
 
-    if not request.text or not request.text.strip():
-        # Clean response for empty payload
+    # Clean response for empty payload
+    if not text or not text.strip():
         clean_res = engine.scan_and_redact("")
         policy_res = policy_engine.evaluate([], ctx)
         risk_res = risk_scorer.calculate_risk([], ctx, policy_res)
@@ -50,26 +56,29 @@ async def scan_text_payload(request: ScanRequest) -> ScanResponse:
         clean_res.triggered_policies = [p.model_dump() for p in policy_res.triggered_policies]
         clean_res.decision_reasons = risk_res.reasons
         clean_res.ai_analysis = ai_res.model_dump()
+        clean_res.source_type = source_type
+        clean_res.filename = filename
+        clean_res.file_size_bytes = file_size_bytes
+        clean_res.extraction_note = extraction_note
         return clean_res
 
-    # Enforce strict size check (max 500KB)
-    if len(request.text) > 500_000:
+    # Enforce strict size check (max 500KB characters for text scanning)
+    if len(text) > 500_000:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail="Payload exceeds maximum permitted size of 500,000 characters.",
         )
 
-    # 1. Run detection and position-aware redaction with enforced security baseline options
-    scan_options = request.options or ScanOptions()
+    # 1. Run detection and position-aware redaction with enforced baseline options
     safe_options = ScanOptions(
         enable_entropy=True,
         entropy_threshold=scan_options.entropy_threshold,
         min_entropy_len=scan_options.min_entropy_len,
         redaction_mode=scan_options.redaction_mode,
     )
-    scan_res = engine.scan_and_redact(request.text, safe_options)
+    scan_res = engine.scan_and_redact(text, safe_options)
 
-    # 2. Evaluate deterministic policies
+    # 2. Evaluate deterministic policies with organization scoping
     policy_res = policy_engine.evaluate(scan_res.findings, ctx)
 
     # 3. Calculate composite risk score
@@ -87,7 +96,6 @@ async def scan_text_payload(request: ScanRequest) -> ScanResponse:
 
     # 5. Prepare sanitized audit metadata (Zero raw secrets, unredacted documents, or prompts stored)
     categories_detected = list(set(f.category.value for f in scan_res.findings))
-    from app.engine.schemas import SeverityLevel
     severity_order = {
         SeverityLevel.CRITICAL: 5,
         SeverityLevel.HIGH: 4,
@@ -117,6 +125,12 @@ async def scan_text_payload(request: ScanRequest) -> ScanResponse:
             "recipient": ctx.recipient.value,
             "classification": ctx.classification.value,
             "actor_id": ctx.actor_id,
+            "org_id": ctx.org_id,
+        },
+        "source": {
+            "source_type": source_type,
+            "filename": filename,
+            "file_size_bytes": file_size_bytes,
         },
         "risk_score": risk_res.score,
         "risk_band": risk_res.band,
@@ -145,10 +159,10 @@ async def scan_text_payload(request: ScanRequest) -> ScanResponse:
         "processing_duration_ms": scan_res.processing_duration_ms,
     }
 
-    # 6. Atomically persist tamper-evident SHA-256 chained audit event and scan record (Fails closed on DB error)
+    # 6. Atomically persist tamper-evident SHA-256 chained audit event and scan record
     triggered_policy_ids = [p.id for p in policy_res.triggered_policies]
     audit_ev = audit_service.append_event(
-        event_type="SCAN_EVALUATION",
+        event_type="FILE_SCAN_EVALUATION" if source_type == "file" else "SCAN_EVALUATION",
         sanitized_metadata=sanitized_metadata,
         scan_id=scan_res.scan_id,
         actor_id=ctx.actor_id,
@@ -157,7 +171,7 @@ async def scan_text_payload(request: ScanRequest) -> ScanResponse:
         scan_record_data=scan_record_data,
     )
 
-    # 7. Enrich response with policy, risk, AI analysis, and audit verification telemetry
+    # 7. Enrich response with telemetry and source attribution
     scan_res.context = ctx.model_dump()
     scan_res.risk_score = risk_res.score
     scan_res.risk_band = risk_res.band
@@ -167,8 +181,141 @@ async def scan_text_payload(request: ScanRequest) -> ScanResponse:
     scan_res.audit_event_id = audit_ev.event_id
     scan_res.audit_event_hash = audit_ev.event_hash
     scan_res.ai_analysis = ai_result.model_dump()
+    scan_res.source_type = source_type
+    scan_res.filename = filename
+    scan_res.file_size_bytes = file_size_bytes
+    scan_res.extraction_note = extraction_note
 
     return scan_res
+
+
+@router.post(
+    "/text",
+    response_model=ScanResponse,
+    summary="Scan and Redact Sensitive Content",
+    description="Deterministic detection, position-aware redaction, policy evaluation, composite risk scoring, and tamper-evident audit logging.",
+)
+async def scan_text_payload(request: ScanRequest) -> ScanResponse:
+    """Scans raw input text, detects sensitive entities, evaluates policy rules,
+    computes composite risk scores, and appends a SHA-256 hash-chained audit record.
+    """
+    if request.context:
+        if isinstance(request.context, dict):
+            ctx = SharingContext(**request.context)
+        elif isinstance(request.context, SharingContext):
+            ctx = request.context
+        else:
+            ctx = SharingContext()
+    else:
+        ctx = SharingContext()
+
+    scan_options = request.options or ScanOptions()
+    return await _execute_scan_pipeline(
+        text=request.text or "",
+        ctx=ctx,
+        scan_options=scan_options,
+        source_meta={"source_type": "text"},
+    )
+
+
+@router.post(
+    "/file",
+    response_model=ScanResponse,
+    summary="Scan and Redact Uploaded File",
+    description="Safely extracts plain text from supported documents, configs, code, and logs, running full DLP inspection.",
+)
+async def scan_file_payload(
+    file: UploadFile = File(...),
+    destination: DestinationType = Form(default=DestinationType.UNSPECIFIED),
+    recipient: RecipientType = Form(default=RecipientType.UNKNOWN),
+    classification: DataClassification = Form(default=DataClassification.INTERNAL),
+    actor_id: str = Form(default="analyst_workbench"),
+    org_id: str = Form(default="default"),
+    redaction_mode: str = Form(default="placeholder"),
+    enable_entropy: bool = Form(default=True),
+    context_json: Optional[str] = Form(default=None),
+    options_json: Optional[str] = Form(default=None),
+) -> ScanResponse:
+    """Safely reads uploaded file into bounded memory, validates extension allowlist,
+    extracts text content, and executes the complete deterministic DLP scan pipeline.
+    """
+    safe_name = sanitize_filename(file.filename)
+
+    # Read bounded content
+    try:
+        raw_bytes = await file.read(MAX_FILE_SIZE_BYTES + 1024)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to read uploaded file: {str(e)}",
+        )
+
+    if len(raw_bytes) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Uploaded file exceeds maximum permitted size of {MAX_FILE_SIZE_BYTES:,} bytes (5 MB).",
+        )
+
+    try:
+        extracted = extract_file_content(safe_name, raw_bytes)
+    except FileExtractionError as err:
+        raise HTTPException(
+            status_code=err.status_code,
+            detail=err.message,
+        )
+
+    # Resolve sharing context (prioritizing context_json if provided)
+    if context_json:
+        try:
+            parsed_ctx = json.loads(context_json)
+            ctx = SharingContext(**parsed_ctx)
+        except Exception:
+            ctx = SharingContext(
+                destination=destination,
+                recipient=recipient,
+                classification=classification,
+                actor_id=actor_id,
+                org_id=org_id,
+            )
+    else:
+        ctx = SharingContext(
+            destination=destination,
+            recipient=recipient,
+            classification=classification,
+            actor_id=actor_id,
+            org_id=org_id,
+        )
+
+    # Resolve scan options
+    if options_json:
+        try:
+            parsed_opt = json.loads(options_json)
+            scan_options = ScanOptions(**parsed_opt)
+        except Exception:
+            scan_options = ScanOptions(
+                enable_entropy=enable_entropy,
+                redaction_mode=redaction_mode,
+            )
+    else:
+        scan_options = ScanOptions(
+            enable_entropy=enable_entropy,
+            redaction_mode=redaction_mode,
+        )
+
+    source_meta = {
+        "source_type": "file",
+        "filename": extracted.filename,
+        "file_size_bytes": extracted.size_bytes,
+        "extension": extracted.extension,
+        "extraction_note": extracted.extraction_note,
+    }
+
+    return await _execute_scan_pipeline(
+        text=extracted.text_content,
+        ctx=ctx,
+        scan_options=scan_options,
+        source_meta=source_meta,
+    )
 
 
 @router.post(

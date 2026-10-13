@@ -66,6 +66,7 @@ export interface SharingContext {
   classification: DataClassification;
   actor_id?: string;
   purpose?: string;
+  org_id?: string;
 }
 
 export interface PolicyRule {
@@ -81,6 +82,7 @@ export interface PolicyRule {
   action: PolicyAction;
   priority: number;
   intent_explanation: string;
+  org_id?: string;
 }
 
 export interface Finding {
@@ -153,6 +155,10 @@ export interface ScanResponse {
   audit_event_id?: string;
   audit_event_hash?: string;
   ai_analysis?: AIContextAnalysisResult;
+  source_type?: string;
+  filename?: string;
+  file_size_bytes?: number;
+  extraction_note?: string;
 }
 
 export interface AuditVerificationResult {
@@ -256,6 +262,43 @@ export async function scanTextPayload(
   return response.json();
 }
 
+export async function scanFilePayload(
+  file: File,
+  options?: { enable_entropy?: boolean; redaction_mode?: string },
+  context?: SharingContext
+): Promise<ScanResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (options) {
+    formData.append('options_json', JSON.stringify(options));
+  }
+  if (context) {
+    formData.append('context_json', JSON.stringify(context));
+  }
+
+  const response = await fetch('/api/v1/scan/file', {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    let errorDetail = response.statusText;
+    try {
+      const errJson = await response.json();
+      errorDetail = errJson.detail || JSON.stringify(errJson);
+    } catch {
+      const errorBody = await response.text();
+      if (errorBody) errorDetail = errorBody;
+    }
+    throw new Error(`File scan failed (${response.status}): ${errorDetail}`);
+  }
+
+  return response.json();
+}
+
 export async function verifyAuditChain(): Promise<AuditVerificationResult> {
   const response = await fetch('/api/v1/audit/verify', {
     method: 'GET',
@@ -272,9 +315,13 @@ export async function verifyAuditChain(): Promise<AuditVerificationResult> {
   return response.json();
 }
 
-export async function fetchPolicies(enabledOnly: boolean = false): Promise<PolicyRule[]> {
-  const query = enabledOnly ? '?enabled_only=true' : '';
-  const response = await fetch(`/api/v1/policies${query}`, {
+export async function fetchPolicies(orgId?: string, enabledOnly: boolean = false): Promise<PolicyRule[]> {
+  const params = new URLSearchParams();
+  if (enabledOnly) params.append('enabled_only', 'true');
+  if (orgId && orgId !== 'all') params.append('org_id', orgId);
+  const queryStr = params.toString() ? `?${params.toString()}` : '';
+
+  const response = await fetch(`/api/v1/policies${queryStr}`, {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -284,6 +331,78 @@ export async function fetchPolicies(enabledOnly: boolean = false): Promise<Polic
   if (!response.ok) {
     const errorBody = await response.text();
     throw new Error(`Failed to load policies (${response.status}): ${errorBody || response.statusText}`);
+  }
+
+  return response.json();
+}
+
+export async function createPolicy(rule: Partial<PolicyRule> & { id: string; name: string; action: PolicyAction }): Promise<PolicyRule> {
+  const response = await fetch('/api/v1/policies', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(rule),
+  });
+
+  if (!response.ok) {
+    let errorDetail = response.statusText;
+    try {
+      const errJson = await response.json();
+      errorDetail = errJson.detail || JSON.stringify(errJson);
+    } catch {
+      const errorBody = await response.text();
+      if (errorBody) errorDetail = errorBody;
+    }
+    throw new Error(`Failed to create policy (${response.status}): ${errorDetail}`);
+  }
+
+  return response.json();
+}
+
+export async function togglePolicy(policyId: string, enabled?: boolean): Promise<{ message: string; policy_id: string; enabled: boolean }> {
+  const query = enabled !== undefined ? `?enabled=${enabled}` : '';
+  const response = await fetch(`/api/v1/policies/${encodeURIComponent(policyId)}/toggle${query}`, {
+    method: 'PATCH',
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    let errorDetail = response.statusText;
+    try {
+      const errJson = await response.json();
+      errorDetail = errJson.detail || JSON.stringify(errJson);
+    } catch {
+      const errorBody = await response.text();
+      if (errorBody) errorDetail = errorBody;
+    }
+    throw new Error(`Failed to toggle policy (${response.status}): ${errorDetail}`);
+  }
+
+  return response.json();
+}
+
+export async function deletePolicy(policyId: string): Promise<{ message: string; policy_id: string }> {
+  const response = await fetch(`/api/v1/policies/${encodeURIComponent(policyId)}`, {
+    method: 'DELETE',
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    let errorDetail = response.statusText;
+    try {
+      const errJson = await response.json();
+      errorDetail = errJson.detail || JSON.stringify(errJson);
+    } catch {
+      const errorBody = await response.text();
+      if (errorBody) errorDetail = errorBody;
+    }
+    throw new Error(`Failed to delete policy (${response.status}): ${errorDetail}`);
   }
 
   return response.json();

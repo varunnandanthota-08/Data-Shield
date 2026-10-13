@@ -50,10 +50,18 @@ class SharingContext(BaseModel):
     )
     actor_id: str = Field(default="user_analyst", description="User or service account initiating the request")
     purpose: Optional[str] = Field(default=None, description="Optional stated business purpose")
+    org_id: str = Field(
+        default="default",
+        description="Organization / Tenant identifier for scoped policy evaluation",
+    )
 
 
 class PolicyRule(BaseModel):
     id: str = Field(description="Unique stable policy ID, e.g., POL-001")
+    org_id: str = Field(
+        default="default",
+        description="Organization or tenant associated with this rule ('default' applies globally)",
+    )
     version: str = Field(default="1.0.0", description="Semantic policy version")
     name: str = Field(description="Human-readable rule name")
     description: str = Field(description="Detailed explanation of what this rule monitors")

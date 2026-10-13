@@ -18,12 +18,22 @@ class PolicyRepository:
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path
 
-    def list_policies(self, enabled_only: bool = False) -> List[PolicyRule]:
+    def list_policies(self, org_id: Optional[str] = None, enabled_only: bool = False) -> List[PolicyRule]:
         with get_db_cursor(self.db_path) as cursor:
             query = "SELECT * FROM policies"
-            params = []
+            clauses = []
+            params: List[Any] = []
+
+            if org_id and org_id != "all":
+                clauses.append("(org_id = ? OR org_id = 'default')")
+                params.append(org_id)
+
             if enabled_only:
-                query += " WHERE enabled = 1"
+                clauses.append("enabled = 1")
+
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+
             query += " ORDER BY priority DESC, id ASC"
 
             cursor.execute(query, params)
@@ -34,10 +44,13 @@ class PolicyRepository:
                 sens = [DataClassification(s) for s in json.loads(r["applicable_sensitivities"])]
                 dests = [DestinationType(d) for d in json.loads(r["target_destinations"])]
                 recips = [RecipientType(rec) for rec in json.loads(r["target_recipients"])]
+                row_keys = r.keys()
+                row_org = r["org_id"] if "org_id" in row_keys else "default"
 
                 policies.append(
                     PolicyRule(
                         id=r["id"],
+                        org_id=row_org,
                         version=r["version"],
                         name=r["name"],
                         description=r["description"],
@@ -59,8 +72,11 @@ class PolicyRepository:
             r = cursor.fetchone()
             if not r:
                 return None
+            row_keys = r.keys()
+            row_org = r["org_id"] if "org_id" in row_keys else "default"
             return PolicyRule(
                 id=r["id"],
+                org_id=row_org,
                 version=r["version"],
                 name=r["name"],
                 description=r["description"],
@@ -80,12 +96,13 @@ class PolicyRepository:
             cursor.execute(
                 """
                 INSERT INTO policies (
-                    id, version, name, description, enabled, action, priority,
+                    id, org_id, version, name, description, enabled, action, priority,
                     applicable_categories, applicable_sensitivities,
                     target_destinations, target_recipients, intent_explanation,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    org_id = excluded.org_id,
                     version = excluded.version,
                     name = excluded.name,
                     description = excluded.description,
@@ -101,6 +118,7 @@ class PolicyRepository:
                 """,
                 (
                     policy.id,
+                    policy.org_id,
                     policy.version,
                     policy.name,
                     policy.description,
@@ -117,6 +135,22 @@ class PolicyRepository:
                 ),
             )
             return policy
+
+    def toggle_policy(self, policy_id: str, enabled: bool) -> Optional[PolicyRule]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with get_db_cursor(self.db_path) as cursor:
+            cursor.execute(
+                "UPDATE policies SET enabled = ?, updated_at = ? WHERE id = ?",
+                (1 if enabled else 0, now_iso, policy_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_policy(policy_id)
+
+    def delete_policy(self, policy_id: str) -> bool:
+        with get_db_cursor(self.db_path) as cursor:
+            cursor.execute("DELETE FROM policies WHERE id = ?", (policy_id,))
+            return cursor.rowcount > 0
 
 
 class ScanRecordRepository:
