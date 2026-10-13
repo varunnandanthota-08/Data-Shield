@@ -44,6 +44,11 @@ class PolicyEngine:
                 return
         self._rules.append(rule)
 
+    def remove_rule(self, rule_id: str) -> bool:
+        initial_len = len(self._rules)
+        self._rules = [r for r in self._rules if r.id != rule_id]
+        return len(self._rules) < initial_len
+
     def _matches_rule(self, rule: PolicyRule, findings: List[Finding], context: SharingContext) -> bool:
         """Determines if a rule triggers based on findings and sharing context."""
         if not rule.enabled:
@@ -76,17 +81,26 @@ class PolicyEngine:
         self,
         findings: List[Finding],
         context: Optional[SharingContext] = None,
+        org_id: Optional[str] = None,
     ) -> PolicyEvaluationResult:
-        """Evaluates all configured policies against findings and sharing context.
+        """Evaluates configured policies against findings and sharing context.
+        Applies organization scoping (default global policies + active organization policies).
         Enforces strict precedence: BLOCK > REQUIRE_APPROVAL > REDACT > WARN > ALLOW.
         Zero-trust principle: Missing context must never silently imply authorization.
         """
         ctx = context or SharingContext()
+        target_org = org_id or getattr(ctx, "org_id", "default") or "default"
         triggered: List[PolicyRule] = []
         reasons: List[str] = []
 
+        # Scope rules to default global rules and rules belonging to target organization
+        scoped_rules = [
+            r for r in self._rules
+            if getattr(r, "org_id", "default") in ("default", target_org)
+        ]
+
         # Sort rules by explicit priority (highest priority first)
-        sorted_rules = sorted(self._rules, key=lambda r: -r.priority)
+        sorted_rules = sorted(scoped_rules, key=lambda r: -r.priority)
 
         # Evaluate rules
         for rule in sorted_rules:

@@ -88,4 +88,8 @@ class ScanResponse(BaseModel):
     audit_event_id: Optional[str] = None
     audit_event_hash: Optional[str] = None
     ai_analysis: Optional[Any] = None
+    source_type: str = "text"
+    filename: Optional[str] = None
+    file_size_bytes: Optional[int] = None
+    extraction_note: Optional[str] = None
 

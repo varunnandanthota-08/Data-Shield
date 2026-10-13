@@ -7,6 +7,7 @@ from app.policy.defaults import DEFAULT_POLICIES
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS policies (
     id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL DEFAULT 'default',
     version TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL,
@@ -61,6 +62,14 @@ def init_db(db_path: Optional[str] = None) -> None:
     with get_db_cursor(db_path) as cursor:
         cursor.executescript(CREATE_TABLES_SQL)
 
+        # Check and migrate org_id column if table pre-existed
+        cursor.execute("PRAGMA table_info(policies)")
+        cols = [c["name"] for c in cursor.fetchall()]
+        if "org_id" not in cols:
+            cursor.execute("ALTER TABLE policies ADD COLUMN org_id TEXT NOT NULL DEFAULT 'default'")
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_policy_org ON policies(org_id)")
+
         # Check if policies exist; if not, seed default policies
         cursor.execute("SELECT COUNT(*) AS cnt FROM policies")
         row = cursor.fetchone()
@@ -70,14 +79,15 @@ def init_db(db_path: Optional[str] = None) -> None:
                 cursor.execute(
                     """
                     INSERT INTO policies (
-                        id, version, name, description, enabled, action, priority,
+                        id, org_id, version, name, description, enabled, action, priority,
                         applicable_categories, applicable_sensitivities,
                         target_destinations, target_recipients, intent_explanation,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         p.id,
+                        getattr(p, "org_id", "default"),
                         p.version,
                         p.name,
                         p.description,
