@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     ]
     SQLITE_DB_PATH: str = "datashield.db"
     GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_TIMEOUT_SECONDS: float = 10.0
+    GEMINI_MAX_RETRIES: int = 2
 
     model_config = SettingsConfigDict(
         env_file=".env",

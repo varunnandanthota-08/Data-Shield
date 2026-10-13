@@ -3,6 +3,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+import threading
 from app.db.connection import get_db_cursor
 from app.policy.schemas import AuditEvent, AuditVerificationResult
 
@@ -79,13 +80,14 @@ class AuditService:
     """Tamper-evident audit logging engine using SHA-256 hash chaining.
     IMPORTANT SECURITY NOTICE:
     Local SHA-256 chaining provides tamper evidence and forward integrity detection,
-    not absolute cryptographic immutability against an attacker with root database access
-    who could theoretically rewrite the entire table and recompute all hashes.
+    not absolute cryptographic immutability against an administrator who can rewrite the database
+    and recompute all hashes.
     CRITICAL: Never store raw secrets or full unredacted document content in audit records.
     """
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path
+        self._write_lock = threading.Lock()
 
     def append_event(
         self,
@@ -95,83 +97,113 @@ class AuditService:
         actor_id: Optional[str] = None,
         policy_decision: Optional[str] = None,
         policy_references: Optional[List[str]] = None,
+        scan_record_data: Optional[Dict[str, Any]] = None,
     ) -> AuditEvent:
         """Appends a new audit event to the hash-chain.
         Atomically queries the latest sequence and previous hash.
+        Optionally writes associated scan record in the same atomic transaction.
+        Thread-synchronized to prevent sequence allocation race conditions.
         Fails closed on database errors.
         """
         refs = policy_references or []
         event_id = str(uuid.uuid4())
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        try:
-            with get_db_cursor(self.db_path) as cursor:
-                # Query the latest event in the chain
-                cursor.execute(
-                    "SELECT sequence_number, event_hash FROM audit_events ORDER BY sequence_number DESC LIMIT 1"
-                )
-                last_row = cursor.fetchone()
+        with self._write_lock:
+            try:
+                with get_db_cursor(self.db_path) as cursor:
+                    # Query the latest event in the chain
+                    cursor.execute(
+                        "SELECT sequence_number, event_hash FROM audit_events ORDER BY sequence_number DESC LIMIT 1"
+                    )
+                    last_row = cursor.fetchone()
 
-                if last_row:
-                    sequence_number = last_row["sequence_number"] + 1
-                    prev_event_hash = last_row["event_hash"]
-                else:
-                    sequence_number = 1
-                    prev_event_hash = GENESIS_HASH
+                    if last_row:
+                        sequence_number = last_row["sequence_number"] + 1
+                        prev_event_hash = last_row["event_hash"]
+                    else:
+                        sequence_number = 1
+                        prev_event_hash = GENESIS_HASH
 
-                # Compute deterministic hash
-                event_hash = compute_event_hash(
-                    event_id=event_id,
-                    sequence_number=sequence_number,
-                    timestamp=timestamp,
-                    event_type=event_type,
-                    scan_id=scan_id,
-                    actor_id=actor_id,
-                    policy_decision=policy_decision,
-                    policy_references=refs,
-                    sanitized_metadata=sanitized_metadata,
-                    prev_event_hash=prev_event_hash,
-                )
+                    # Compute deterministic hash
+                    event_hash = compute_event_hash(
+                        event_id=event_id,
+                        sequence_number=sequence_number,
+                        timestamp=timestamp,
+                        event_type=event_type,
+                        scan_id=scan_id,
+                        actor_id=actor_id,
+                        policy_decision=policy_decision,
+                        policy_references=refs,
+                        sanitized_metadata=sanitized_metadata,
+                        prev_event_hash=prev_event_hash,
+                    )
 
-                cursor.execute(
-                    """
-                    INSERT INTO audit_events (
-                        event_id, sequence_number, timestamp, event_type, scan_id, actor_id,
-                        policy_decision, policy_references, sanitized_metadata,
-                        prev_event_hash, event_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        sequence_number,
-                        timestamp,
-                        event_type,
-                        scan_id,
-                        actor_id,
-                        policy_decision,
-                        json.dumps(refs),
-                        json.dumps(sanitized_metadata),
-                        prev_event_hash,
-                        event_hash,
-                    ),
-                )
+                    cursor.execute(
+                        """
+                        INSERT INTO audit_events (
+                            event_id, sequence_number, timestamp, event_type, scan_id, actor_id,
+                            policy_decision, policy_references, sanitized_metadata,
+                            prev_event_hash, event_hash
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_id,
+                            sequence_number,
+                            timestamp,
+                            event_type,
+                            scan_id,
+                            actor_id,
+                            policy_decision,
+                            json.dumps(refs),
+                            json.dumps(sanitized_metadata),
+                            prev_event_hash,
+                            event_hash,
+                        ),
+                    )
 
-                return AuditEvent(
-                    event_id=event_id,
-                    sequence_number=sequence_number,
-                    timestamp=timestamp,
-                    event_type=event_type,
-                    scan_id=scan_id,
-                    actor_id=actor_id,
-                    policy_decision=policy_decision,
-                    policy_references=refs,
-                    sanitized_metadata=sanitized_metadata,
-                    prev_event_hash=prev_event_hash,
-                    event_hash=event_hash,
-                )
-        except Exception as exc:
-            # Explicitly fail closed; persistence failure must not be masked
-            raise AuditPersistenceError(f"Failed to persist tamper-evident audit record: {exc}") from exc
+                    # Persist associated scan record in the SAME atomic transaction if provided
+                    if scan_record_data:
+                        cursor.execute(
+                            """
+                            INSERT INTO scan_records (
+                                scan_id, timestamp, actor_id, destination, recipient, classification,
+                                risk_score, risk_band, final_decision, finding_count,
+                                categories_detected, processing_duration_ms
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                scan_record_data["scan_id"],
+                                scan_record_data.get("timestamp", timestamp),
+                                scan_record_data["actor_id"],
+                                scan_record_data["destination"],
+                                scan_record_data["recipient"],
+                                scan_record_data["classification"],
+                                scan_record_data["risk_score"],
+                                scan_record_data["risk_band"],
+                                scan_record_data["final_decision"],
+                                scan_record_data["finding_count"],
+                                json.dumps(scan_record_data["categories_detected"]),
+                                scan_record_data["processing_duration_ms"],
+                            ),
+                        )
+
+                    return AuditEvent(
+                        event_id=event_id,
+                        sequence_number=sequence_number,
+                        timestamp=timestamp,
+                        event_type=event_type,
+                        scan_id=scan_id,
+                        actor_id=actor_id,
+                        policy_decision=policy_decision,
+                        policy_references=refs,
+                        sanitized_metadata=sanitized_metadata,
+                        prev_event_hash=prev_event_hash,
+                        event_hash=event_hash,
+                    )
+            except Exception as exc:
+                # Explicitly fail closed; persistence failure must not be masked
+                raise AuditPersistenceError(f"Failed to persist tamper-evident audit record: {exc}") from exc
 
     def list_events(self, limit: int = 50, offset: int = 0) -> Tuple[List[AuditEvent], int]:
         """Returns paginated audit events ordered by sequence number descending."""
@@ -191,22 +223,31 @@ class AuditService:
                 (limit, offset),
             )
             rows = cursor.fetchall()
-            events = [
-                AuditEvent(
-                    event_id=r["event_id"],
-                    sequence_number=r["sequence_number"],
-                    timestamp=r["timestamp"],
-                    event_type=r["event_type"],
-                    scan_id=r["scan_id"],
-                    actor_id=r["actor_id"],
-                    policy_decision=r["policy_decision"],
-                    policy_references=json.loads(r["policy_references"]),
-                    sanitized_metadata=json.loads(r["sanitized_metadata"]),
-                    prev_event_hash=r["prev_event_hash"],
-                    event_hash=r["event_hash"],
+            events = []
+            for r in rows:
+                try:
+                    refs = json.loads(r["policy_references"]) if r["policy_references"] else []
+                except Exception:
+                    refs = []
+                try:
+                    meta = json.loads(r["sanitized_metadata"]) if r["sanitized_metadata"] else {}
+                except Exception:
+                    meta = {"_corrupted": True}
+                events.append(
+                    AuditEvent(
+                        event_id=r["event_id"],
+                        sequence_number=r["sequence_number"],
+                        timestamp=r["timestamp"],
+                        event_type=r["event_type"],
+                        scan_id=r["scan_id"],
+                        actor_id=r["actor_id"],
+                        policy_decision=r["policy_decision"],
+                        policy_references=refs,
+                        sanitized_metadata=meta,
+                        prev_event_hash=r["prev_event_hash"],
+                        event_hash=r["event_hash"],
+                    )
                 )
-                for r in rows
-            ]
             return events, total
 
     def get_all_events_ordered(self) -> List[AuditEvent]:
@@ -222,31 +263,53 @@ class AuditService:
                 """
             )
             rows = cursor.fetchall()
-            return [
-                AuditEvent(
-                    event_id=r["event_id"],
-                    sequence_number=r["sequence_number"],
-                    timestamp=r["timestamp"],
-                    event_type=r["event_type"],
-                    scan_id=r["scan_id"],
-                    actor_id=r["actor_id"],
-                    policy_decision=r["policy_decision"],
-                    policy_references=json.loads(r["policy_references"]),
-                    sanitized_metadata=json.loads(r["sanitized_metadata"]),
-                    prev_event_hash=r["prev_event_hash"],
-                    event_hash=r["event_hash"],
+            events = []
+            for r in rows:
+                try:
+                    refs = json.loads(r["policy_references"]) if r["policy_references"] else []
+                except Exception:
+                    refs = []
+                try:
+                    meta = json.loads(r["sanitized_metadata"]) if r["sanitized_metadata"] else {}
+                except Exception:
+                    meta = {"_corrupted": True}
+                events.append(
+                    AuditEvent(
+                        event_id=r["event_id"],
+                        sequence_number=r["sequence_number"],
+                        timestamp=r["timestamp"],
+                        event_type=r["event_type"],
+                        scan_id=r["scan_id"],
+                        actor_id=r["actor_id"],
+                        policy_decision=r["policy_decision"],
+                        policy_references=refs,
+                        sanitized_metadata=meta,
+                        prev_event_hash=r["prev_event_hash"],
+                        event_hash=r["event_hash"],
+                    )
                 )
-                for r in rows
-            ]
+            return events
 
     def verify_chain(self) -> AuditVerificationResult:
         """Verifies the integrity of the audit log chain:
         1. Checks sequence continuity (1, 2, 3... no gaps).
         2. Checks previous hash linkage (event[i].prev_event_hash == event[i-1].event_hash).
-        3. Recomputes SHA-256 for each event payload to detect in-place tampering.
+        3. Recomputes SHA-256 for each event payload to detect in-place tampering or corruption.
+        4. Fails safely on malformed or missing audit fields.
         """
-        events = self.get_all_events_ordered()
-        if not events:
+        with get_db_cursor(self.db_path) as cursor:
+            cursor.execute(
+                """
+                SELECT event_id, sequence_number, timestamp, event_type, scan_id, actor_id,
+                       policy_decision, policy_references, sanitized_metadata,
+                       prev_event_hash, event_hash
+                FROM audit_events
+                ORDER BY sequence_number ASC
+                """
+            )
+            rows = cursor.fetchall()
+
+        if not rows:
             return AuditVerificationResult(
                 is_valid=True,
                 total_events=0,
@@ -261,77 +324,100 @@ class AuditService:
         errors: List[str] = []
         verified_count = 0
 
-        for i, ev in enumerate(events):
+        for i, r in enumerate(rows):
             expected_seq = i + 1
+            ev_id = r["event_id"]
+            seq_num = r["sequence_number"]
+            prev_hash = r["prev_event_hash"]
+            event_hash = r["event_hash"]
 
             # Check sequence continuity
-            if ev.sequence_number != expected_seq:
-                err = f"Sequence break at index {i}: Expected sequence {expected_seq}, found {ev.sequence_number} (event_id={ev.event_id})."
+            if seq_num is None or seq_num != expected_seq:
+                err = f"Sequence break at index {i}: Expected sequence {expected_seq}, found {seq_num} (event_id={ev_id})."
                 errors.append(err)
                 return AuditVerificationResult(
                     is_valid=False,
-                    total_events=len(events),
+                    total_events=len(rows),
                     verified_events=verified_count,
-                    tampered_event_id=ev.event_id,
+                    tampered_event_id=ev_id,
                     errors=errors,
-                    chain_head_hash=ev.event_hash,
-                    details=f"Sequence discontinuity detected at event {ev.event_id}.",
+                    chain_head_hash=event_hash or "",
+                    details=f"Sequence discontinuity detected at event {ev_id}.",
                 )
 
             # Check hash chain link
-            if ev.prev_event_hash != expected_prev_hash:
+            if prev_hash != expected_prev_hash:
                 err = (
-                    f"Broken hash link at sequence {ev.sequence_number} (event_id={ev.event_id}): "
-                    f"prev_event_hash '{ev.prev_event_hash}' does not match expected '{expected_prev_hash}'."
+                    f"Broken hash link at sequence {seq_num} (event_id={ev_id}): "
+                    f"prev_event_hash '{prev_hash}' does not match expected '{expected_prev_hash}'."
                 )
                 errors.append(err)
                 return AuditVerificationResult(
                     is_valid=False,
-                    total_events=len(events),
+                    total_events=len(rows),
                     verified_events=verified_count,
-                    tampered_event_id=ev.event_id,
+                    tampered_event_id=ev_id,
                     errors=errors,
-                    chain_head_hash=ev.event_hash,
-                    details=f"Hash chain broken at event {ev.event_id}.",
+                    chain_head_hash=event_hash or "",
+                    details=f"Hash chain broken at event {ev_id}.",
+                )
+
+            # Safely parse JSON fields to catch malformed payloads
+            try:
+                refs = json.loads(r["policy_references"]) if r["policy_references"] else []
+                meta = json.loads(r["sanitized_metadata"]) if r["sanitized_metadata"] else {}
+            except Exception as parse_err:
+                err = (
+                    f"Malformed or corrupted payload JSON in event {ev_id} (sequence {seq_num}): {parse_err}"
+                )
+                errors.append(err)
+                return AuditVerificationResult(
+                    is_valid=False,
+                    total_events=len(rows),
+                    verified_events=verified_count,
+                    tampered_event_id=ev_id,
+                    errors=errors,
+                    chain_head_hash=event_hash or "",
+                    details=f"Malformed audit payload detected at event {ev_id}.",
                 )
 
             # Recompute event hash to detect payload tampering
             recomputed = compute_event_hash(
-                event_id=ev.event_id,
-                sequence_number=ev.sequence_number,
-                timestamp=ev.timestamp,
-                event_type=ev.event_type,
-                scan_id=ev.scan_id,
-                actor_id=ev.actor_id,
-                policy_decision=ev.policy_decision,
-                policy_references=ev.policy_references,
-                sanitized_metadata=ev.sanitized_metadata,
-                prev_event_hash=ev.prev_event_hash,
+                event_id=ev_id,
+                sequence_number=seq_num,
+                timestamp=r["timestamp"] or "",
+                event_type=r["event_type"] or "",
+                scan_id=r["scan_id"],
+                actor_id=r["actor_id"],
+                policy_decision=r["policy_decision"],
+                policy_references=refs,
+                sanitized_metadata=meta,
+                prev_event_hash=prev_hash or "",
             )
 
-            if recomputed != ev.event_hash:
+            if recomputed != event_hash:
                 err = (
-                    f"Tampered event payload at sequence {ev.sequence_number} (event_id={ev.event_id}): "
-                    f"Stored hash '{ev.event_hash}' differs from recomputed '{recomputed}'."
+                    f"Tampered event payload at sequence {seq_num} (event_id={ev_id}): "
+                    f"Stored hash '{event_hash}' differs from recomputed '{recomputed}'."
                 )
                 errors.append(err)
                 return AuditVerificationResult(
                     is_valid=False,
-                    total_events=len(events),
+                    total_events=len(rows),
                     verified_events=verified_count,
-                    tampered_event_id=ev.event_id,
+                    tampered_event_id=ev_id,
                     errors=errors,
-                    chain_head_hash=ev.event_hash,
-                    details=f"Tampered content detected in event {ev.event_id}.",
+                    chain_head_hash=event_hash or "",
+                    details=f"Tampered content detected in event {ev_id}.",
                 )
 
-            expected_prev_hash = ev.event_hash
+            expected_prev_hash = event_hash
             verified_count += 1
 
-        last_hash = events[-1].event_hash
+        last_hash = rows[-1]["event_hash"]
         return AuditVerificationResult(
             is_valid=True,
-            total_events=len(events),
+            total_events=len(rows),
             verified_events=verified_count,
             tampered_event_id=None,
             errors=[],

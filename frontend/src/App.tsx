@@ -1,18 +1,20 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { checkBackendHealth, HealthCheckResult } from './api/client';
-import { HealthStatus } from './components/HealthStatus';
+import { Navbar, SOCTab } from './components/Navbar';
+import { OverviewDashboard } from './components/OverviewDashboard';
 import { ScanWorkbench } from './components/ScanWorkbench';
-import { Shield, Lock, Terminal, CheckCircle2 } from 'lucide-react';
+import { ScanHistoryView } from './components/ScanHistoryView';
+import { PolicyExplorerView } from './components/PolicyExplorerView';
+import { AuditTrailView } from './components/AuditTrailView';
+import { SettingsView } from './components/SettingsView';
 
 export const App: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<SOCTab>('overview');
   const [healthResult, setHealthResult] = useState<HealthCheckResult | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
 
   const fetchHealth = useCallback(async () => {
-    setLoading(true);
     const res = await checkBackendHealth();
     setHealthResult(res);
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -21,192 +23,135 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [fetchHealth]);
 
+  const renderActiveTabContent = () => {
+    switch (activeTab) {
+      case 'overview':
+        return <OverviewDashboard onNavigate={setActiveTab} />;
+      case 'workbench':
+        return <ScanWorkbench />;
+      case 'history':
+        return <ScanHistoryView />;
+      case 'policies':
+        return <PolicyExplorerView />;
+      case 'audit':
+        return <AuditTrailView />;
+      case 'settings':
+        return <SettingsView health={healthResult} onRefreshHealth={fetchHealth} />;
+      default:
+        return <OverviewDashboard onNavigate={setActiveTab} />;
+    }
+  };
+
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-      {/* Top Navbar */}
-      <header
+    <div className="soc-layout" style={{ minHeight: '100vh', display: 'flex', background: 'var(--bg-main)' }}>
+      {/* Sidebar Navigation */}
+      <Navbar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        health={healthResult}
+      />
+
+      {/* Main Content Workspace */}
+      <div
+        className="soc-main-area"
         style={{
-          borderBottom: '1px solid var(--border-subtle)',
-          padding: '16px 32px',
+          flex: 1,
           display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          backdropFilter: 'blur(12px)',
-          background: 'rgba(7, 11, 18, 0.8)',
-          position: 'sticky',
-          top: 0,
-          zIndex: 50,
+          flexDirection: 'column',
+          minWidth: 0,
+          background: 'var(--bg-main)',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div
-            style={{
-              width: '38px',
-              height: '38px',
-              borderRadius: '10px',
-              background: 'linear-gradient(135deg, rgba(0, 242, 254, 0.2), rgba(2, 132, 199, 0.3))',
-              border: '1px solid rgba(0, 242, 254, 0.4)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 0 16px rgba(0, 242, 254, 0.2)',
-            }}
-          >
-            <Shield size={20} color="var(--accent-cyan)" />
-          </div>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: '1.15rem', letterSpacing: '-0.02em', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span>DataShield</span>
-              <span style={{ color: 'var(--accent-cyan)', fontSize: '0.85rem', fontWeight: 600, padding: '2px 6px', background: 'rgba(0, 242, 254, 0.1)', borderRadius: '4px' }}>AI</span>
-            </div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-              GenAI DLP & Sensitive Data Exposure Gateway
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <div className="badge badge-success font-mono" style={{ fontSize: '0.75rem' }}>
-            Phase 3 Policy & Audit Engine Active
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-            <Lock size={14} color="var(--accent-emerald)" />
-            <span>Deterministic Redactor</span>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Container */}
-      <main style={{ flex: 1, padding: '40px 24px', maxWidth: '1150px', margin: '0 auto', width: '100%' }}>
-        {/* Hero Section */}
-        <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-          <div
-            className="badge badge-info"
-            style={{ marginBottom: '14px', padding: '6px 14px', fontSize: '0.8rem' }}
-          >
-            Phase 3 Active • Contextual Policies • Composite Risk Scoring • Tamper-Evident Audit Trails
-          </div>
-          <h1
-            style={{
-              fontSize: '2.4rem',
-              fontWeight: 800,
-              letterSpacing: '-0.03em',
-              lineHeight: 1.2,
-              marginBottom: '14px',
-              background: 'linear-gradient(135deg, #ffffff 40%, var(--accent-blue) 100%)',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-            }}
-          >
-            Policy Engine, Risk Scoring & Audit Gateway
-          </h1>
-          <p
-            style={{
-              fontSize: '1rem',
-              color: 'var(--text-secondary)',
-              maxWidth: '680px',
-              margin: '0 auto',
-              lineHeight: 1.6,
-            }}
-          >
-            Inspect sensitive content, enforce destination-aware security boundaries,
-            compute 0-100 composite risk scores, and log SHA-256 hash-chained audit events.
-          </p>
-        </div>
-
-        {/* Live Interactive Detection & Redaction Workbench */}
-        <div style={{ marginBottom: '36px' }}>
-          <ScanWorkbench />
-        </div>
-
-        {/* Live Backend Connectivity Widget */}
-        <div style={{ marginBottom: '36px' }}>
-          <HealthStatus result={healthResult} loading={loading} onRefresh={fetchHealth} />
-        </div>
-
-        {/* System Architecture Roadmap Progress */}
-        <div className="glass-panel" style={{ padding: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '18px' }}>
-            <Terminal size={18} color="var(--accent-cyan)" />
-            <h3 style={{ fontSize: '1.05rem', fontWeight: 700 }}>Implementation Roadmap Status</h3>
+        {/* Workspace Top Header Bar */}
+        <header
+          style={{
+            height: '48px',
+            borderBottom: '1px solid var(--border-subtle)',
+            padding: '0 32px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'var(--bg-surface)',
+            fontSize: '0.78rem',
+            color: 'var(--text-muted)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ color: 'var(--text-secondary)' }}>Console</span>
+            <span>/</span>
+            <span style={{ color: 'var(--text-primary)', fontWeight: 600, textTransform: 'capitalize' }}>
+              {activeTab === 'workbench' ? 'Scan Workbench' : activeTab === 'audit' ? 'Audit Trail' : activeTab}
+            </span>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <span className="font-mono" style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+              Bound: 127.0.0.1:8001
+            </span>
             <div
               style={{
-                padding: '16px',
-                borderRadius: 'var(--radius-md)',
-                background: 'rgba(16, 185, 129, 0.08)',
-                border: '1px solid rgba(16, 185, 129, 0.3)',
+                width: '1px',
+                height: '14px',
+                background: 'var(--border-strong)',
               }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                <CheckCircle2 size={16} color="var(--accent-emerald)" />
-                <span style={{ fontWeight: 600, fontSize: '0.9rem', color: '#34d399' }}>Phase 1 (Complete)</span>
-              </div>
-              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                FastAPI backend, Vite + React TypeScript client, design system tokens, and connectivity telemetry.
-              </div>
-            </div>
-
-            <div
-              style={{
-                padding: '16px',
-                borderRadius: 'var(--radius-md)',
-                background: 'rgba(16, 185, 129, 0.08)',
-                border: '1px solid rgba(16, 185, 129, 0.3)',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                <CheckCircle2 size={16} color="var(--accent-emerald)" />
-                <span style={{ fontWeight: 600, fontSize: '0.9rem', color: '#34d399' }}>Phase 2 (Complete)</span>
-              </div>
-              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                Multi-tier Detection & Redaction Engine: Regex, Luhn checksums, Shannon entropy, and non-destructive redaction.
-              </div>
-            </div>
-
-            <div
-              style={{
-                padding: '16px',
-                borderRadius: 'var(--radius-md)',
-                background: 'rgba(16, 185, 129, 0.08)',
-                border: '1px solid rgba(16, 185, 129, 0.3)',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                <CheckCircle2 size={16} color="var(--accent-emerald)" />
-                <span style={{ fontWeight: 600, fontSize: '0.9rem', color: '#34d399' }}>Phase 3 (Complete)</span>
-              </div>
-              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                Deterministic policy engine, composite risk scoring (0-100), and SHA-256 hash-chained audit trails.
-              </div>
-            </div>
+            />
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+              Deterministic Engine Active
+            </span>
           </div>
-        </div>
-      </main>
+        </header>
 
-      {/* Footer */}
-      <footer
-        style={{
-          borderTop: '1px solid var(--border-subtle)',
-          padding: '20px 32px',
-          textAlign: 'center',
-          fontSize: '0.8rem',
-          color: 'var(--text-muted)',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          maxWidth: '1100px',
-          margin: '0 auto',
-          width: '100%',
-        }}
-      >
-        <div>DataShield AI • GenAI DLP & Sensitive Data Exposure</div>
-        <div className="font-mono" style={{ fontSize: '0.75rem' }}>
-          Loopback API: http://127.0.0.1:8001/api/health
-        </div>
-      </footer>
+        {/* Content Body */}
+        <main
+          style={{
+            flex: 1,
+            padding: '32px',
+            maxWidth: '1360px',
+            margin: '0 auto',
+            width: '100%',
+          }}
+        >
+          {renderActiveTabContent()}
+        </main>
+
+        {/* Minimal Enterprise Footer */}
+        <footer
+          style={{
+            borderTop: '1px solid var(--border-subtle)',
+            padding: '14px 32px',
+            fontSize: '0.74rem',
+            color: 'var(--text-muted)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            maxWidth: '1360px',
+            margin: '0 auto',
+            width: '100%',
+            flexWrap: 'wrap',
+            gap: '12px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <span>DataShield AI • Enterprise SOC Platform</span>
+            <span>•</span>
+            <span>Deterministic Policy Invariance & Tamper-Evident SHA-256 Audit Trail</span>
+          </div>
+          <div className="font-mono" style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+            Loopback Development Profile • v0.1.0
+          </div>
+        </footer>
+      </div>
+
+      <style>{`
+        @media (max-width: 899px) {
+          .soc-layout {
+            flex-direction: column !important;
+          }
+          .soc-main-area main {
+            padding: 20px 16px !important;
+          }
+        }
+      `}</style>
     </div>
   );
 };

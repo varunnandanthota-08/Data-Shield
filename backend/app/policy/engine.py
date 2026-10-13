@@ -114,15 +114,18 @@ class PolicyEngine:
                 )
 
         # Zero-trust safety fallback: If destination or recipient is ambiguous and findings exist,
-        # never silently allow even if no custom rule matched
+        # or data classification is confidential/restricted, never silently allow even if no custom rule matched
         has_ambiguity = (
             ctx.destination == DestinationType.UNSPECIFIED
             or ctx.recipient == RecipientType.UNKNOWN
         )
-        if has_ambiguity and findings and not any(r.action in (PolicyAction.BLOCK, PolicyAction.REQUIRE_APPROVAL) for r in triggered):
+        has_sensitive_risk = bool(findings) or (
+            ctx.classification in (DataClassification.CONFIDENTIAL, DataClassification.RESTRICTED)
+        )
+        if has_ambiguity and has_sensitive_risk and not any(r.action in (PolicyAction.BLOCK, PolicyAction.REQUIRE_APPROVAL) for r in triggered):
             reasons.append(
                 "Zero-trust fallback: Transfer context contains unspecified destination or unknown recipient "
-                "with active findings. Escalating to REQUIRE_APPROVAL."
+                "with sensitive content. Escalating to REQUIRE_APPROVAL."
             )
             # Create synthetic fallback trigger indicator
             fallback_rule = PolicyRule(

@@ -174,3 +174,109 @@ class TestZeroRawSecretExposureInAudit:
 
         assert raw_secret_pattern not in stored_json
         assert masked_version in stored_json
+
+
+class TestConcurrentAuditAndAtomicPersistence:
+    def test_concurrent_audit_writes_sequence_and_hash_integrity(self, temp_db):
+        """Tests concurrent audit writes across multiple threads to verify sequence allocation and hash integrity."""
+        import concurrent.futures
+        service = AuditService(temp_db)
+
+        def worker(idx: int):
+            return service.append_event(
+                event_type="CONCURRENT_EVAL",
+                sanitized_metadata={"worker_index": idx, "status": "ok"},
+                scan_id=f"scan_concurrent_{idx}",
+                policy_decision="ALLOW",
+            )
+
+        worker_count = 15
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(worker, i) for i in range(worker_count)]
+            results = [f.result() for f in futures]
+
+        assert len(results) == worker_count
+
+        # Sequence numbers must be strictly 1..worker_count with zero collisions
+        seq_numbers = sorted(ev.sequence_number for ev in results)
+        assert seq_numbers == list(range(1, worker_count + 1))
+
+        # Cryptographically verify the entire chain
+        verif = service.verify_chain()
+        assert verif.is_valid is True
+        assert verif.total_events == worker_count
+        assert verif.verified_events == worker_count
+        assert verif.tampered_event_id is None
+        assert verif.errors == []
+
+    def test_atomic_scan_record_and_audit_consistency(self, temp_db):
+        """Verifies scan record and audit event are persisted consistently together in the same atomic transaction."""
+        from app.db.repository import scan_record_repo
+        service = AuditService(temp_db)
+        scan_record_repo_temp = type(scan_record_repo)(temp_db)
+
+        scan_data = {
+            "scan_id": "scan_atomic_001",
+            "actor_id": "analyst_atomic",
+            "destination": "PUBLIC_LLM",
+            "recipient": "PUBLIC",
+            "classification": "CONFIDENTIAL",
+            "risk_score": 90,
+            "risk_band": "CRITICAL",
+            "final_decision": "BLOCK",
+            "finding_count": 1,
+            "categories_detected": ["SECRET"],
+            "processing_duration_ms": 1.25,
+        }
+
+        audit_ev = service.append_event(
+            event_type="SCAN_EVALUATION",
+            sanitized_metadata={"masked": "AKIA***"},
+            scan_id=scan_data["scan_id"],
+            actor_id=scan_data["actor_id"],
+            policy_decision=scan_data["final_decision"],
+            scan_record_data=scan_data,
+        )
+
+        assert audit_ev.scan_id == "scan_atomic_001"
+
+        # Verify scan record exists and matches
+        stored_rec = scan_record_repo_temp.get_scan_record("scan_atomic_001")
+        assert stored_rec is not None
+        assert stored_rec["scan_id"] == "scan_atomic_001"
+        assert stored_rec["final_decision"] == "BLOCK"
+        assert stored_rec["risk_score"] == 90
+
+
+class TestMalformedAuditSafety:
+    def test_malformed_json_in_sanitized_metadata_fails_safely(self, temp_db):
+        """Verify malformed JSON in audit record fails safely without crashing verify_chain."""
+        service = AuditService(temp_db)
+        ev1 = service.append_event("TEST", {"key": "val1"})
+
+        # Inject malformed non-JSON data into sanitized_metadata
+        conn = sqlite3.connect(temp_db)
+        conn.execute("UPDATE audit_events SET sanitized_metadata = 'CORRUPTED_NON_JSON{' WHERE event_id = ?", (ev1.event_id,))
+        conn.commit()
+        conn.close()
+
+        # verify_chain must detect tampering and return is_valid=False without crashing
+        verif = service.verify_chain()
+        assert verif.is_valid is False
+        assert verif.tampered_event_id == ev1.event_id
+        assert any("Malformed" in err or "corrupted" in err.lower() for err in verif.errors)
+
+    def test_missing_sequence_or_hash_fails_safely(self, temp_db):
+        """Verify missing sequence numbers fail safely."""
+        service = AuditService(temp_db)
+        ev1 = service.append_event("TEST", {"key": "val1"})
+
+        conn = sqlite3.connect(temp_db)
+        conn.execute("UPDATE audit_events SET prev_event_hash = 'INVALID_HASH' WHERE event_id = ?", (ev1.event_id,))
+        conn.commit()
+        conn.close()
+
+        verif = service.verify_chain()
+        assert verif.is_valid is False
+        assert verif.tampered_event_id == ev1.event_id
+
