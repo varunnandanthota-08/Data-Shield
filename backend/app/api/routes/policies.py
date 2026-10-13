@@ -13,7 +13,13 @@ from app.policy.schemas import (
     SharingContext,
 )
 
-router = APIRouter(prefix="/v1/policies", tags=["Policy Engine & Rules"])
+router = APIRouter(
+    prefix="/v1/policies",
+    tags=["Policy Engine & Rules [Development-Only]"],
+    responses={
+        200: {"description": "Successful operation"},
+    },
+)
 
 
 class PolicyEvaluateRequest(BaseModel):
@@ -32,8 +38,8 @@ class PolicyEvaluateResponse(BaseModel):
 @router.get(
     "",
     response_model=List[PolicyRule],
-    summary="List Security & Privacy Policies",
-    description="Returns all active or configured deterministic policy rules.",
+    summary="List Security & Privacy Policies [Development-Only]",
+    description="Returns all active or configured deterministic policy rules. Development-only capability: access control required before production use.",
 )
 async def list_policies(
     enabled_only: bool = Query(default=False, description="Filter for only enabled rules")
@@ -45,7 +51,8 @@ async def list_policies(
 @router.get(
     "/{policy_id}",
     response_model=PolicyRule,
-    summary="Get Specific Policy Rule",
+    summary="Get Specific Policy Rule [Development-Only]",
+    description="Development-only capability: requires authentication/authorization before exposure to production networks.",
 )
 async def get_policy(policy_id: str) -> PolicyRule:
     policy = policy_repo.get_policy(policy_id)
@@ -61,8 +68,8 @@ async def get_policy(policy_id: str) -> PolicyRule:
     "",
     response_model=PolicyRule,
     status_code=status.HTTP_201_CREATED,
-    summary="Create or Update Policy Rule",
-    description="Creates or updates a policy rule. Development-only capability: access control required before production use.",
+    summary="Create or Update Policy Rule [Development-Only]",
+    description="Creates or updates a policy rule. Development-only capability: access control required before production use. Do not expose to untrusted networks.",
 )
 async def save_policy(rule: PolicyRule) -> PolicyRule:
     saved = policy_repo.save_policy(rule)
@@ -81,11 +88,14 @@ async def evaluate_policies(request: PolicyEvaluateRequest) -> PolicyEvaluateRes
     ctx = request.context or SharingContext()
 
     findings: List[Finding] = []
-    if request.findings is not None:
-        findings = request.findings
-    elif request.text:
+    if request.text:
         scan_res = engine.scan_and_redact(request.text, request.options)
         findings = scan_res.findings
+        if request.findings:
+            from app.policy.risk_scorer import deduplicate_overlapping_findings
+            findings = deduplicate_overlapping_findings(findings + request.findings)
+    elif request.findings is not None:
+        findings = request.findings
 
     policy_res = policy_engine.evaluate(findings, ctx)
     risk_res = risk_scorer.calculate_risk(findings, ctx, policy_res)

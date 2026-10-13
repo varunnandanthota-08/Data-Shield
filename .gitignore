@@ -43,6 +43,11 @@ dist-ssr/
 *.env
 !.env.example
 
+# Database & SQLite files
+*.db
+*.sqlite
+*.sqlite3
+
 # IDE
 .vscode/
 .idea/

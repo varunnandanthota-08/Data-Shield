@@ -177,3 +177,101 @@ class TestAmbiguousAndMissingContext:
 
         assert not any(p.id == "POL-CUSTOM-TEST" for p in result.triggered_policies)
         assert result.final_decision != PolicyAction.BLOCK
+
+    def test_hard_block_invariance_over_all_other_actions(self):
+        """Hard block invariance: BLOCK must always win over ALLOW, WARN, REQUIRE_APPROVAL, and REDACT."""
+        rules = [
+            PolicyRule(
+                id="POL-ALLOW",
+                name="Allow Rule",
+                description="allow",
+                enabled=True,
+                action=PolicyAction.ALLOW,
+                priority=100,
+                intent_explanation="allow",
+            ),
+            PolicyRule(
+                id="POL-WARN",
+                name="Warn Rule",
+                description="warn",
+                enabled=True,
+                action=PolicyAction.WARN,
+                priority=90,
+                intent_explanation="warn",
+            ),
+            PolicyRule(
+                id="POL-REQUIRE-APPROVAL",
+                name="Approval Rule",
+                description="approval",
+                enabled=True,
+                action=PolicyAction.REQUIRE_APPROVAL,
+                priority=80,
+                intent_explanation="approval",
+            ),
+            PolicyRule(
+                id="POL-REDACT",
+                name="Redact Rule",
+                description="redact",
+                enabled=True,
+                action=PolicyAction.REDACT,
+                priority=70,
+                intent_explanation="redact",
+            ),
+            PolicyRule(
+                id="POL-BLOCK",
+                name="Block Rule",
+                description="block",
+                enabled=True,
+                action=PolicyAction.BLOCK,
+                priority=10,  # Lowest priority number
+                intent_explanation="block",
+            ),
+        ]
+        engine = PolicyEngine(rules)
+        ctx = SharingContext()
+        finding = create_dummy_finding(FindingCategory.SECRET)
+
+        result = engine.evaluate([finding], ctx)
+        assert result.final_decision == PolicyAction.BLOCK
+        assert result.hard_block_enforced is True
+
+    def test_rule_priority_cannot_override_block(self):
+        """Verify that high numerical rule priority cannot override hard-block invariance."""
+        allow_super_priority = PolicyRule(
+            id="POL-SUPER-ALLOW",
+            name="Super High Priority Allow",
+            description="attempt to bypass block",
+            enabled=True,
+            action=PolicyAction.ALLOW,
+            priority=99999,
+            intent_explanation="attempt bypass",
+        )
+        block_low_priority = PolicyRule(
+            id="POL-LOW-BLOCK",
+            name="Low Priority Block",
+            description="hard block",
+            enabled=True,
+            action=PolicyAction.BLOCK,
+            priority=1,
+            intent_explanation="must enforce",
+        )
+        engine = PolicyEngine([allow_super_priority, block_low_priority])
+        ctx = SharingContext()
+        finding = create_dummy_finding(FindingCategory.SECRET)
+
+        result = engine.evaluate([finding], ctx)
+        assert result.final_decision == PolicyAction.BLOCK
+        assert result.hard_block_enforced is True
+
+    def test_zero_trust_missing_context_escalates_confidential_without_findings(self):
+        """Zero-trust: missing context on confidential data escalates to REQUIRE_APPROVAL even with zero findings."""
+        engine = PolicyEngine()  # default policies
+        ctx = SharingContext(
+            destination=DestinationType.UNSPECIFIED,
+            recipient=RecipientType.UNKNOWN,
+            classification=DataClassification.CONFIDENTIAL,
+        )
+
+        result = engine.evaluate([], ctx)
+        assert result.final_decision == PolicyAction.REQUIRE_APPROVAL
+        assert any("POL-004" in p.id or "POL-FALLBACK" in p.id for p in result.triggered_policies)

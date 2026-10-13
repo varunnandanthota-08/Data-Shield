@@ -112,3 +112,108 @@ class TestAPIPhase3Endpoints:
         assert verify_data["is_valid"] is True
         assert verify_data["verified_events"] >= 1
         assert verify_data["tampered_event_id"] is None
+
+    def test_invalid_context_returns_422(self):
+        """Verify invalid context format returns 422 Validation Error instead of 500 Internal Server Error."""
+        payload = {
+            "text": "Valid test text",
+            "context": {
+                "destination": "INVALID_DESTINATION_FOR_SECURITY_TEST",
+            },
+        }
+        res = client.post("/api/v1/scan/text", json=payload)
+        assert res.status_code == 422
+
+    def test_options_cannot_suppress_entropy_detection(self):
+        """Verify callers cannot disable entropy detection via request options to suppress findings."""
+        # Synthetic high entropy token
+        high_entropy_token = "K9zX8bQ2wV5pL1mJ7yT4rN6sD3fG0hA9"
+        payload = {
+            "text": f"Here is high entropy token: {high_entropy_token}",
+            "options": {"enable_entropy": False},
+        }
+        res = client.post("/api/v1/scan/text", json=payload)
+        assert res.status_code == 200
+        data = res.json()
+        # High entropy token must be detected despite caller's attempt to disable it
+        assert any(f["category"] == "HIGH_ENTROPY_TOKEN" for f in data["findings"])
+
+    def test_audit_highest_severity_hierarchy(self):
+        """Verify audit record highest_severity uses severity hierarchy (CRITICAL > LOW) rather than alphabetical sort."""
+        payload = {
+            "text": "AWS Key: AKIAIOSFODNN7EXAMPLE and Phone: +1 415 555 2671",
+            "context": {
+                "destination": "PUBLIC_LLM",
+                "recipient": "PUBLIC",
+                "classification": "CONFIDENTIAL",
+            },
+        }
+        res = client.post("/api/v1/scan/text", json=payload)
+        assert res.status_code == 200
+        audit_id = res.json()["audit_event_id"]
+
+        events_res = client.get("/api/v1/audit/events?limit=10")
+        assert events_res.status_code == 200
+        matching = [e for e in events_res.json()["items"] if e["event_id"] == audit_id]
+        assert len(matching) == 1
+        meta = matching[0]["sanitized_metadata"]
+        assert meta["highest_severity"] == "CRITICAL"
+        assert meta["highest_severity"] != "LOW"
+
+    def test_redact_produces_redacted_text_in_scan_endpoint(self):
+        """Confirm scan endpoint produces appropriately redacted outgoing content."""
+        payload = {
+            "text": "Secret deployed: AKIAIOSFODNN7EXAMPLE and email dev@example.com",
+        }
+        res = client.post("/api/v1/scan/text", json=payload)
+        assert res.status_code == 200
+        data = res.json()
+        assert "[REDACTED_AWS_KEY]" in data["redacted_text"]
+        assert "[REDACTED_EMAIL]" in data["redacted_text"]
+        assert "AKIAIOSFODNN7EXAMPLE" not in data["redacted_text"]
+        assert "dev@example.com" not in data["redacted_text"]
+
+    def test_list_scan_records_and_detail(self):
+        """Phase 5: Test scan records list, filtering, and detail endpoint."""
+        # 1. Perform a scan to ensure at least one record exists
+        payload = {
+            "text": "AWS Key: AKIAIOSFODNN7EXAMPLE",
+            "context": {
+                "destination": "PUBLIC_LLM",
+                "recipient": "PUBLIC",
+                "classification": "CONFIDENTIAL",
+            },
+        }
+        scan_res = client.post("/api/v1/scan/text", json=payload)
+        assert scan_res.status_code == 200
+        scan_id = scan_res.json()["scan_id"]
+
+        # 2. Query scan records page
+        records_res = client.get("/api/v1/scan/records?limit=10")
+        assert records_res.status_code == 200
+        records_data = records_res.json()
+        assert "items" in records_data
+        assert "total" in records_data
+        assert records_data["total"] >= 1
+        assert any(r["scan_id"] == scan_id for r in records_data["items"])
+
+        # 3. Query specific detail
+        detail_res = client.get(f"/api/v1/scan/records/{scan_id}")
+        assert detail_res.status_code == 200
+        detail_data = detail_res.json()
+        assert detail_data["scan_id"] == scan_id
+        assert detail_data["final_decision"] == "BLOCK"
+        assert "audit_event_id" in detail_data
+        assert "audit_metadata" in detail_data
+
+    def test_get_soc_metrics(self):
+        """Phase 5: Test SOC metrics aggregation endpoint."""
+        res = client.get("/api/v1/scan/metrics")
+        assert res.status_code == 200
+        data = res.json()
+        assert "total_scans" in data
+        assert "blocked_count" in data
+        assert "avg_risk_score" in data
+        assert "total_findings" in data
+        assert data["total_scans"] >= 1
+

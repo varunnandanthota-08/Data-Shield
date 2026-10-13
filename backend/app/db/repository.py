@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from app.db.connection import get_db_cursor
 from app.engine.schemas import FindingCategory
 from app.policy.schemas import (
@@ -184,8 +184,88 @@ class ScanRecordRepository:
                 "risk_band": r["risk_band"],
                 "final_decision": r["final_decision"],
                 "finding_count": r["finding_count"],
-                "categories_detected": json.loads(r["categories_detected"]),
+                "categories_detected": json.loads(r["categories_detected"]) if r["categories_detected"] else [],
                 "processing_duration_ms": r["processing_duration_ms"],
+            }
+
+    def list_scan_records(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        action: Optional[str] = None,
+        risk_band: Optional[str] = None,
+        destination: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        query = "SELECT * FROM scan_records WHERE 1=1"
+        count_query = "SELECT COUNT(*) AS total FROM scan_records WHERE 1=1"
+        params: List[Any] = []
+
+        if action:
+            query += " AND final_decision = ?"
+            count_query += " AND final_decision = ?"
+            params.append(action)
+        if risk_band:
+            query += " AND risk_band = ?"
+            count_query += " AND risk_band = ?"
+            params.append(risk_band)
+        if destination:
+            query += " AND destination = ?"
+            count_query += " AND destination = ?"
+            params.append(destination)
+
+        query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        exec_params = list(params) + [limit, offset]
+
+        with get_db_cursor(self.db_path) as cursor:
+            cursor.execute(count_query, params)
+            total = cursor.fetchone()["total"]
+
+            cursor.execute(query, exec_params)
+            rows = cursor.fetchall()
+            records = []
+            for r in rows:
+                records.append({
+                    "scan_id": r["scan_id"],
+                    "timestamp": r["timestamp"],
+                    "actor_id": r["actor_id"],
+                    "destination": r["destination"],
+                    "recipient": r["recipient"],
+                    "classification": r["classification"],
+                    "risk_score": r["risk_score"],
+                    "risk_band": r["risk_band"],
+                    "final_decision": r["final_decision"],
+                    "finding_count": r["finding_count"],
+                    "categories_detected": json.loads(r["categories_detected"]) if r["categories_detected"] else [],
+                    "processing_duration_ms": r["processing_duration_ms"],
+                })
+            return records, total
+
+    def get_metrics(self) -> Dict[str, Any]:
+        with get_db_cursor(self.db_path) as cursor:
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_scans,
+                    COALESCE(SUM(CASE WHEN final_decision = 'BLOCK' THEN 1 ELSE 0 END), 0) as blocked_count,
+                    COALESCE(SUM(CASE WHEN final_decision = 'REQUIRE_APPROVAL' THEN 1 ELSE 0 END), 0) as approval_count,
+                    COALESCE(SUM(CASE WHEN final_decision = 'WARN' THEN 1 ELSE 0 END), 0) as warn_count,
+                    COALESCE(SUM(CASE WHEN final_decision = 'ALLOW' THEN 1 ELSE 0 END), 0) as allow_count,
+                    COALESCE(SUM(CASE WHEN risk_band = 'CRITICAL' THEN 1 ELSE 0 END), 0) as critical_count,
+                    COALESCE(SUM(CASE WHEN risk_band = 'HIGH' THEN 1 ELSE 0 END), 0) as high_count,
+                    COALESCE(AVG(risk_score), 0.0) as avg_risk_score,
+                    COALESCE(SUM(finding_count), 0) as total_findings
+                FROM scan_records
+            """)
+            r = cursor.fetchone()
+            return {
+                "total_scans": r["total_scans"],
+                "blocked_count": r["blocked_count"],
+                "approval_count": r["approval_count"],
+                "warn_count": r["warn_count"],
+                "allow_count": r["allow_count"],
+                "critical_count": r["critical_count"],
+                "high_count": r["high_count"],
+                "avg_risk_score": round(float(r["avg_risk_score"]), 1),
+                "total_findings": r["total_findings"],
             }
 
 

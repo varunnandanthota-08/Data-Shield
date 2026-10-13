@@ -1,6 +1,6 @@
 from enum import Enum
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field, field_validator
 
 
 class FindingCategory(str, Enum):
@@ -28,9 +28,9 @@ class ConfidenceBand(str, Enum):
 
 class ScanOptions(BaseModel):
     enable_entropy: bool = Field(default=True, description="Enable Shannon high-entropy token detection")
-    entropy_threshold: float = Field(default=4.2, description="Shannon entropy bit threshold (typical 4.0 - 4.5)")
-    min_entropy_len: int = Field(default=20, description="Minimum length for entropy token consideration")
-    redaction_mode: str = Field(default="placeholder", description="Redaction mode: 'placeholder' or 'synthetic'")
+    entropy_threshold: float = Field(default=4.2, ge=2.0, le=6.0, description="Shannon entropy bit threshold (typical 4.0 - 4.5)")
+    min_entropy_len: int = Field(default=20, ge=8, le=128, description="Minimum length for entropy token consideration")
+    redaction_mode: Literal["placeholder", "synthetic"] = Field(default="placeholder", description="Redaction mode: 'placeholder' or 'synthetic'")
 
 
 class Finding(BaseModel):
@@ -59,6 +59,18 @@ class ScanRequest(BaseModel):
     options: Optional[ScanOptions] = Field(default=None, description="Optional scan and redaction configuration")
     context: Optional[Any] = Field(default=None, description="Optional explicit sharing context (destination, recipient, classification)")
 
+    @field_validator("context", mode="before")
+    @classmethod
+    def validate_context(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        from app.policy.schemas import SharingContext
+        if isinstance(v, SharingContext):
+            return v
+        if isinstance(v, dict):
+            return SharingContext(**v)
+        raise ValueError("context must be a valid SharingContext object or dictionary.")
+
 
 class ScanResponse(BaseModel):
     scan_id: str
@@ -75,4 +87,5 @@ class ScanResponse(BaseModel):
     decision_reasons: Optional[List[str]] = None
     audit_event_id: Optional[str] = None
     audit_event_hash: Optional[str] = None
+    ai_analysis: Optional[Any] = None
 
