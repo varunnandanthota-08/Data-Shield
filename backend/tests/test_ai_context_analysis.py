@@ -460,3 +460,250 @@ class TestEndToEndScanWithAIIntegration:
         # AI recommendations remain advisory
         for rec in data["ai_analysis"]["remediation_recommendations"]:
             assert rec["is_advisory"] is True
+
+
+class TestStep4UsageAndReliabilityTelemetry:
+    """Step 4 validation: Google GenAI SDK token usage, cost attribution, and reliability telemetry."""
+
+    def test_successful_call_usage_metadata_captured(self, sample_findings, sample_context, sample_policy_result, sample_risk_result):
+        """Verifies provider-confirmed token usage metadata is correctly captured and not estimated."""
+        mock_response_data = {
+            "incident_summary": "Test incident summary.",
+            "relevant_risk_factors": ["High risk transfer"],
+            "policy_rationales": {"POL-001": "Secret egress blocked"},
+            "ambiguities_and_uncertainty": [],
+            "remediation_recommendations": [],
+            "human_review_recommended": True,
+        }
+
+        mock_usage_meta = MagicMock()
+        mock_usage_meta.prompt_token_count = 142
+        mock_usage_meta.candidates_token_count = 68
+        mock_usage_meta.total_token_count = 210
+        mock_usage_meta.cached_content_token_count = 32
+
+        mock_genai_client = MagicMock()
+        mock_model_resp = MagicMock()
+        mock_model_resp.text = json.dumps(mock_response_data)
+        mock_model_resp.usage_metadata = mock_usage_meta
+        mock_model_resp.response_id = "resp_test_12345"
+        mock_genai_client.models.generate_content.return_value = mock_model_resp
+
+        service = GeminiContextAnalysisService()
+        with patch.object(GeminiContextAnalysisService, "is_configured", new_callable=PropertyMock, return_value=True):
+            with patch.object(service, "_get_client", return_value=mock_genai_client):
+                result = service.analyze_context(
+                    sanitized_text="Clean sanitized excerpt",
+                    findings=sample_findings,
+                    context=sample_context,
+                    policy_result=sample_policy_result,
+                    risk_result=sample_risk_result,
+                )
+
+        assert result.ai_status == "SUCCESS"
+        assert result.usage is not None
+        assert result.usage.prompt_tokens == 142
+        assert result.usage.candidates_tokens == 68
+        assert result.usage.total_tokens == 210
+        assert result.usage.cached_tokens == 32
+        assert result.usage.is_estimated is False
+        assert result.usage.operation == "context_policy_remediation"
+        assert result.usage.api_calls_count == 1
+        assert result.usage.provider_status == "SUCCESS"
+        assert result.usage.provider_response_id == "resp_test_12345"
+        assert result.usage.latency_ms is not None
+        assert result.usage.latency_ms >= 0
+        assert result.usage.retries_attempted == 0
+        assert result.usage.rate_limit_encountered is False
+
+    def test_missing_usage_metadata_no_crash_and_no_estimation(self, sample_findings, sample_context, sample_policy_result, sample_risk_result):
+        """Verifies when provider usage_metadata is absent, tokens are None and not heuristically estimated."""
+        mock_response_data = {
+            "incident_summary": "Test incident summary.",
+            "relevant_risk_factors": [],
+            "policy_rationales": {"POL-001": "Blocked"},
+            "ambiguities_and_uncertainty": [],
+            "remediation_recommendations": [],
+            "human_review_recommended": False,
+        }
+
+        mock_genai_client = MagicMock()
+        mock_model_resp = MagicMock()
+        mock_model_resp.text = json.dumps(mock_response_data)
+        mock_model_resp.usage_metadata = None
+        mock_model_resp.response_id = None
+        mock_genai_client.models.generate_content.return_value = mock_model_resp
+
+        service = GeminiContextAnalysisService()
+        with patch.object(GeminiContextAnalysisService, "is_configured", new_callable=PropertyMock, return_value=True):
+            with patch.object(service, "_get_client", return_value=mock_genai_client):
+                result = service.analyze_context(
+                    sanitized_text="Clean sanitized excerpt",
+                    findings=sample_findings,
+                    context=sample_context,
+                    policy_result=sample_policy_result,
+                    risk_result=sample_risk_result,
+                )
+
+        assert result.ai_status == "SUCCESS"
+        assert result.usage is not None
+        assert result.usage.prompt_tokens is None
+        assert result.usage.candidates_tokens is None
+        assert result.usage.total_tokens is None
+        assert result.usage.cached_tokens is None
+        assert result.usage.is_estimated is False
+        assert result.usage.api_calls_count == 1
+
+    def test_transient_retry_and_rate_limit_tracking(self, sample_findings, sample_context, sample_policy_result, sample_risk_result):
+        """Verifies transient 429 rate limit response is caught, retried, and recorded in telemetry."""
+        mock_response_data = {
+            "incident_summary": "Recovered after retry.",
+            "relevant_risk_factors": [],
+            "policy_rationales": {"POL-001": "Blocked"},
+            "ambiguities_and_uncertainty": [],
+            "remediation_recommendations": [],
+            "human_review_recommended": False,
+        }
+
+        mock_model_resp = MagicMock()
+        mock_model_resp.text = json.dumps(mock_response_data)
+        mock_model_resp.usage_metadata = MagicMock(prompt_token_count=100, candidates_token_count=30, total_token_count=130, cached_content_token_count=None)
+        mock_model_resp.response_id = "retry_resp_123"
+
+        mock_genai_client = MagicMock()
+        # Fail first attempt with 429 ResourceExhausted, succeed second attempt
+        mock_genai_client.models.generate_content.side_effect = [
+            Exception("HTTP 429 ResourceExhausted: rate limit exceeded, quota reached"),
+            mock_model_resp,
+        ]
+
+        service = GeminiContextAnalysisService()
+        with patch.object(GeminiContextAnalysisService, "is_configured", new_callable=PropertyMock, return_value=True):
+            with patch.object(service, "_get_client", return_value=mock_genai_client):
+                with patch("time.sleep", return_value=None):
+                    result = service.analyze_context(
+                        sanitized_text="Clean sanitized excerpt",
+                        findings=sample_findings,
+                        context=sample_context,
+                        policy_result=sample_policy_result,
+                        risk_result=sample_risk_result,
+                    )
+
+        assert result.ai_status == "SUCCESS"
+        assert result.usage is not None
+        assert result.usage.retries_attempted == 1
+        assert result.usage.rate_limit_encountered is True
+        assert result.usage.error_type == "RATE_LIMIT"
+        assert result.usage.total_tokens == 130
+        assert result.usage.api_calls_count == 1
+
+    def test_timeout_fallback_telemetry(self, sample_findings, sample_context, sample_policy_result, sample_risk_result):
+        """Verifies persistent timeout exhausts retries, falls back safely, and records timeout telemetry."""
+        mock_genai_client = MagicMock()
+        mock_genai_client.models.generate_content.side_effect = Exception("ReadTimeoutError: Client timed out waiting for response")
+
+        service = GeminiContextAnalysisService()
+        with patch.object(GeminiContextAnalysisService, "is_configured", new_callable=PropertyMock, return_value=True):
+            with patch.object(service, "_get_client", return_value=mock_genai_client):
+                with patch("time.sleep", return_value=None):
+                    result = service.analyze_context(
+                        sanitized_text="Clean sanitized excerpt",
+                        findings=sample_findings,
+                        context=sample_context,
+                        policy_result=sample_policy_result,
+                        risk_result=sample_risk_result,
+                    )
+
+        assert result.ai_status == "FALLBACK"
+        assert result.is_ai_assisted is False
+        assert result.usage is not None
+        assert result.usage.timeout_encountered is True
+        assert result.usage.error_type == "TIMEOUT"
+        assert result.usage.prompt_tokens is None
+        assert result.usage.is_estimated is False
+        assert result.usage.api_calls_count == 1
+        assert "ReadTimeoutError" in (result.usage.fallback_reason or "")
+
+    def test_unconfigured_telemetry(self, sample_findings, sample_context, sample_policy_result, sample_risk_result):
+        """Verifies unconfigured state sets 0 live API calls and error_type=NOT_CONFIGURED."""
+        service = GeminiContextAnalysisService()
+        with patch.object(GeminiContextAnalysisService, "is_configured", new_callable=PropertyMock, return_value=False):
+            result = service.analyze_context(
+                sanitized_text="Clean sanitized excerpt",
+                findings=sample_findings,
+                context=sample_context,
+                policy_result=sample_policy_result,
+                risk_result=sample_risk_result,
+            )
+
+        assert result.ai_status == "UNAVAILABLE"
+        assert result.is_ai_assisted is False
+        assert result.usage is not None
+        assert result.usage.api_calls_count == 0
+        assert result.usage.error_type == "NOT_CONFIGURED"
+        assert result.usage.prompt_tokens is None
+
+    def test_audit_event_telemetry_isolation(self, test_client):
+        """Verifies audit event contains structured token and reliability metrics without leaking raw text."""
+        mock_response_data = {
+            "incident_summary": "Audit telemetry test summary.",
+            "relevant_risk_factors": ["High risk transfer"],
+            "policy_rationales": {"POL-001": "Credential leak blocked"},
+            "ambiguities_and_uncertainty": [],
+            "remediation_recommendations": [],
+            "human_review_recommended": True,
+        }
+
+        mock_usage_meta = MagicMock()
+        mock_usage_meta.prompt_token_count = 185
+        mock_usage_meta.candidates_token_count = 72
+        mock_usage_meta.total_token_count = 257
+        mock_usage_meta.cached_content_token_count = 0
+
+        mock_genai_client = MagicMock()
+        mock_model_resp = MagicMock()
+        mock_model_resp.text = json.dumps(mock_response_data)
+        mock_model_resp.usage_metadata = mock_usage_meta
+        mock_model_resp.response_id = "audit_resp_001"
+        mock_genai_client.models.generate_content.return_value = mock_model_resp
+
+        payload = {
+            "text": "export AWS_ACCESS_KEY_ID='AKIAIOSFODNN7EXAMPLE'",
+            "options": {"enable_entropy": True, "redaction_mode": "placeholder"},
+            "context": {
+                "destination": "PUBLIC_LLM",
+                "recipient": "PUBLIC",
+                "classification": "CONFIDENTIAL",
+            },
+        }
+
+        with patch.object(GeminiContextAnalysisService, "is_configured", new_callable=PropertyMock, return_value=True):
+            with patch.object(GeminiContextAnalysisService, "_get_client", return_value=mock_genai_client):
+                response = test_client.post("/api/v1/scan/text", json=payload)
+
+        assert response.status_code == 200
+        data = response.json()
+        scan_id = data["scan_id"]
+
+        # Fetch persisted audit event
+        record_resp = test_client.get(f"/api/v1/scan/records/{scan_id}")
+        assert record_resp.status_code == 200
+        record_data = record_resp.json()
+
+        audit_meta = record_data.get("audit_metadata", {})
+        ai_meta = audit_meta.get("ai_analysis", {})
+
+        # Verify usage attribution in audit log
+        assert ai_meta.get("status") == "SUCCESS"
+        assert ai_meta.get("prompt_tokens") == 185
+        assert ai_meta.get("candidates_tokens") == 72
+        assert ai_meta.get("total_tokens") == 257
+        assert ai_meta.get("operation") == "context_policy_remediation"
+        assert ai_meta.get("api_calls_count") == 1
+        assert ai_meta.get("is_estimated") is False
+        assert "latency_ms" in ai_meta
+
+        # Zero raw secret or payload leakage in audit metadata
+        audit_dump = json.dumps(audit_meta)
+        assert "AKIAIOSFODNN7EXAMPLE" not in audit_dump
+

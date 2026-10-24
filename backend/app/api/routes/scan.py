@@ -1,8 +1,11 @@
 import json
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 from app.audit.service import audit_service
+from app.auth.dependencies import require_analyst_or_admin, require_authenticated
+from app.auth.models import UserResponse
+from app.auth.rate_limiter import scan_rate_limiter
 from app.db.connection import get_db_cursor
 from app.db.repository import scan_record_repo
 from app.engine.file_extractor import (
@@ -65,7 +68,7 @@ async def _execute_scan_pipeline(
     # Enforce strict size check (max 500KB characters for text scanning)
     if len(text) > 500_000:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail="Payload exceeds maximum permitted size of 500,000 characters.",
         )
 
@@ -139,6 +142,19 @@ async def _execute_scan_pipeline(
             "attempted": True,
             "status": ai_result.ai_status,
             "model": ai_result.model_identifier,
+            "operation": ai_result.usage.operation if ai_result.usage else "context_policy_remediation",
+            "api_calls_count": ai_result.usage.api_calls_count if ai_result.usage else 0,
+            "prompt_tokens": ai_result.usage.prompt_tokens if ai_result.usage else None,
+            "candidates_tokens": ai_result.usage.candidates_tokens if ai_result.usage else None,
+            "total_tokens": ai_result.usage.total_tokens if ai_result.usage else None,
+            "cached_tokens": ai_result.usage.cached_tokens if ai_result.usage else None,
+            "is_estimated": ai_result.usage.is_estimated if ai_result.usage else False,
+            "latency_ms": ai_result.usage.latency_ms if ai_result.usage else None,
+            "retries_attempted": ai_result.usage.retries_attempted if ai_result.usage else 0,
+            "rate_limit_encountered": ai_result.usage.rate_limit_encountered if ai_result.usage else False,
+            "timeout_encountered": ai_result.usage.timeout_encountered if ai_result.usage else False,
+            "error_type": ai_result.usage.error_type if ai_result.usage else None,
+            "fallback_reason": ai_result.usage.fallback_reason if ai_result.usage else None,
             "recommendation_count": len(ai_result.remediation_recommendations),
             "recommendation_ids": [r.id for r in ai_result.remediation_recommendations],
             "human_review_recommended": ai_result.human_review_recommended,
@@ -148,6 +164,7 @@ async def _execute_scan_pipeline(
     scan_record_data = {
         "scan_id": scan_res.scan_id,
         "actor_id": ctx.actor_id,
+        "org_id": ctx.org_id,
         "destination": ctx.destination.value,
         "recipient": ctx.recipient.value,
         "classification": ctx.classification.value,
@@ -169,6 +186,7 @@ async def _execute_scan_pipeline(
         policy_decision=risk_res.final_decision.value,
         policy_references=triggered_policy_ids,
         scan_record_data=scan_record_data,
+        org_id=ctx.org_id,
     )
 
     # 7. Enrich response with telemetry and source attribution
@@ -193,12 +211,25 @@ async def _execute_scan_pipeline(
     "/text",
     response_model=ScanResponse,
     summary="Scan and Redact Sensitive Content",
-    description="Deterministic detection, position-aware redaction, policy evaluation, composite risk scoring, and tamper-evident audit logging.",
+    description="Deterministic detection, position-aware redaction, policy evaluation, composite risk scoring, and tamper-evident audit logging. Accessible to Analysts and Admins.",
 )
-async def scan_text_payload(request: ScanRequest) -> ScanResponse:
+async def scan_text_payload(
+    request: ScanRequest,
+    current_user: UserResponse = Depends(require_analyst_or_admin),
+) -> ScanResponse:
     """Scans raw input text, detects sensitive entities, evaluates policy rules,
     computes composite risk scores, and appends a SHA-256 hash-chained audit record.
     """
+    # Enforce scan rate limiting per user / tenant to prevent compute exhaustion
+    rate_key = f"scan_rate_user:{current_user.id}_org:{current_user.org_id}"
+    is_limited, retry_after = scan_rate_limiter.check_rate_limit(rate_key)
+    if is_limited:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Scan rate limit exceeded. Please wait {retry_after} seconds before submitting more scans.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     if request.context:
         if isinstance(request.context, dict):
             ctx = SharingContext(**request.context)
@@ -208,6 +239,14 @@ async def scan_text_payload(request: ScanRequest) -> ScanResponse:
             ctx = SharingContext()
     else:
         ctx = SharingContext()
+
+    if not ctx.actor_id or ctx.actor_id == "analyst_workbench":
+        ctx.actor_id = current_user.username
+    # Force verified server tenant identity for non-default tenants; default admin can specify target org
+    if current_user.org_id != "default":
+        ctx.org_id = current_user.org_id
+    else:
+        ctx.org_id = ctx.org_id or "default"
 
     scan_options = request.options or ScanOptions()
     return await _execute_scan_pipeline(
@@ -222,7 +261,7 @@ async def scan_text_payload(request: ScanRequest) -> ScanResponse:
     "/file",
     response_model=ScanResponse,
     summary="Scan and Redact Uploaded File",
-    description="Safely extracts plain text from supported documents, configs, code, and logs, running full DLP inspection.",
+    description="Safely extracts plain text from supported documents, configs, code, and logs, running full DLP inspection. Accessible to Analysts and Admins.",
 )
 async def scan_file_payload(
     file: UploadFile = File(...),
@@ -235,10 +274,21 @@ async def scan_file_payload(
     enable_entropy: bool = Form(default=True),
     context_json: Optional[str] = Form(default=None),
     options_json: Optional[str] = Form(default=None),
+    current_user: UserResponse = Depends(require_analyst_or_admin),
 ) -> ScanResponse:
     """Safely reads uploaded file into bounded memory, validates extension allowlist,
     extracts text content, and executes the complete deterministic DLP scan pipeline.
     """
+    # Enforce scan rate limiting per user / tenant
+    rate_key = f"scan_rate_user:{current_user.id}_org:{current_user.org_id}"
+    is_limited, retry_after = scan_rate_limiter.check_rate_limit(rate_key)
+    if is_limited:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Scan rate limit exceeded. Please wait {retry_after} seconds before submitting more scans.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     safe_name = sanitize_filename(file.filename)
 
     # Read bounded content
@@ -252,7 +302,7 @@ async def scan_file_payload(
 
     if len(raw_bytes) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=f"Uploaded file exceeds maximum permitted size of {MAX_FILE_SIZE_BYTES:,} bytes (5 MB).",
         )
 
@@ -264,26 +314,38 @@ async def scan_file_payload(
             detail=err.message,
         )
 
+    resolved_actor_id = actor_id if (actor_id and actor_id != "analyst_workbench") else current_user.username
+    if current_user.org_id != "default":
+        resolved_org_id = current_user.org_id
+    else:
+        resolved_org_id = org_id or "default"
+
     # Resolve sharing context (prioritizing context_json if provided)
     if context_json:
         try:
             parsed_ctx = json.loads(context_json)
             ctx = SharingContext(**parsed_ctx)
+            if not ctx.actor_id or ctx.actor_id == "analyst_workbench":
+                ctx.actor_id = resolved_actor_id
+            if current_user.org_id != "default":
+                ctx.org_id = current_user.org_id
+            else:
+                ctx.org_id = ctx.org_id or resolved_org_id
         except Exception:
             ctx = SharingContext(
                 destination=destination,
                 recipient=recipient,
                 classification=classification,
-                actor_id=actor_id,
-                org_id=org_id,
+                actor_id=resolved_actor_id,
+                org_id=resolved_org_id,
             )
     else:
         ctx = SharingContext(
             destination=destination,
             recipient=recipient,
             classification=classification,
-            actor_id=actor_id,
-            org_id=org_id,
+            actor_id=resolved_actor_id,
+            org_id=resolved_org_id,
         )
 
     # Resolve scan options
@@ -322,11 +384,14 @@ async def scan_file_payload(
     "/explain",
     response_model=dict,
     summary="Generate AI-Assisted Security Explanation & Remediation",
-    description="Typed endpoint for standalone explainability and least-privilege remediation advice.",
+    description="Typed endpoint for standalone explainability and least-privilege remediation advice. Accessible to Analysts and Admins.",
 )
-async def explain_transfer_context(request: ScanRequest) -> dict:
+async def explain_transfer_context(
+    request: ScanRequest,
+    current_user: UserResponse = Depends(require_analyst_or_admin),
+) -> dict:
     """Provides plain-language explanation and actionable least-privilege recommendations."""
-    scan_res = await scan_text_payload(request)
+    scan_res = await scan_text_payload(request, current_user=current_user)
     return scan_res.ai_analysis or {}
 
 
@@ -341,7 +406,7 @@ class ScanRecordsPage(BaseModel):
     "/records",
     response_model=ScanRecordsPage,
     summary="List Persisted Scan Records",
-    description="Returns paginated historical scan evaluations with safe metadata, risk scores, and decisions.",
+    description="Returns paginated historical scan evaluations with safe metadata, risk scores, and decisions. Accessible to all authenticated users.",
 )
 async def list_scan_records(
     limit: int = Query(default=50, ge=1, le=500, description="Page limit"),
@@ -349,9 +414,11 @@ async def list_scan_records(
     action: Optional[str] = Query(default=None, description="Filter by final policy action"),
     risk_band: Optional[str] = Query(default=None, description="Filter by risk band"),
     destination: Optional[str] = Query(default=None, description="Filter by destination"),
+    current_user: UserResponse = Depends(require_authenticated),
 ) -> ScanRecordsPage:
+    user_org = current_user.org_id if current_user.org_id != "default" else None
     items, total = scan_record_repo.list_scan_records(
-        limit=limit, offset=offset, action=action, risk_band=risk_band, destination=destination
+        limit=limit, offset=offset, action=action, risk_band=risk_band, destination=destination, org_id=user_org
     )
     return ScanRecordsPage(items=items, total=total, limit=limit, offset=offset)
 
@@ -360,17 +427,24 @@ async def list_scan_records(
     "/records/{scan_id}",
     response_model=Dict[str, Any],
     summary="Get Scan Record Detail",
-    description="Returns detailed persisted scan evaluation and associated safe audit metadata.",
+    description="Returns detailed persisted scan evaluation and associated safe audit metadata. Accessible to all authenticated users.",
 )
-async def get_scan_record_detail(scan_id: str) -> Dict[str, Any]:
-    record = scan_record_repo.get_scan_record(scan_id)
+async def get_scan_record_detail(
+    scan_id: str,
+    current_user: UserResponse = Depends(require_authenticated),
+) -> Dict[str, Any]:
+    user_org = current_user.org_id if current_user.org_id != "default" else None
+    record = scan_record_repo.get_scan_record(scan_id, org_id=user_org)
     if not record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Scan record '{scan_id}' not found.",
         )
     with get_db_cursor(audit_service.db_path) as cursor:
-        cursor.execute("SELECT * FROM audit_events WHERE scan_id = ?", (scan_id,))
+        if user_org:
+            cursor.execute("SELECT * FROM audit_events WHERE scan_id = ? AND org_id = ?", (scan_id, user_org))
+        else:
+            cursor.execute("SELECT * FROM audit_events WHERE scan_id = ?", (scan_id,))
         audit_row = cursor.fetchone()
         if audit_row:
             record["audit_event_id"] = audit_row["event_id"]
@@ -386,7 +460,10 @@ async def get_scan_record_detail(scan_id: str) -> Dict[str, Any]:
     "/metrics",
     response_model=Dict[str, Any],
     summary="Get SOC Console Overview Metrics",
-    description="Returns real aggregate metrics calculated from persisted scan records.",
+    description="Returns real aggregate metrics calculated from persisted scan records. Accessible to all authenticated users.",
 )
-async def get_soc_metrics() -> Dict[str, Any]:
-    return scan_record_repo.get_metrics()
+async def get_soc_metrics(
+    current_user: UserResponse = Depends(require_authenticated),
+) -> Dict[str, Any]:
+    user_org = current_user.org_id if current_user.org_id != "default" else None
+    return scan_record_repo.get_metrics(org_id=user_org)

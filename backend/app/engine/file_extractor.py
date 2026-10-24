@@ -2,12 +2,13 @@ import io
 import os
 import re
 from typing import Dict, List, Optional, Set, Tuple
+from app.core.config import settings
 
-# Maximum permitted uploaded file size: 5 MB
-MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
+# Maximum permitted uploaded file size: default 5 MB (configurable via MAX_UPLOAD_SIZE_BYTES)
+MAX_FILE_SIZE_BYTES = settings.MAX_UPLOAD_SIZE_BYTES
 
-# Maximum permitted extracted characters to scan: 500,000 chars
-MAX_EXTRACTED_CHARS = 500_000
+# Maximum permitted extracted characters to scan: default 500,000 chars (configurable via MAX_EXTRACTED_CHARS)
+MAX_EXTRACTED_CHARS = settings.MAX_EXTRACTED_CHARS
 
 # Supported extension sets
 TEXT_AND_DATA_EXTENSIONS: Set[str] = {
@@ -138,6 +139,13 @@ def extract_plain_text(raw_bytes: bytes, filename: str) -> str:
 
 def extract_pdf_text(raw_bytes: bytes, filename: str) -> Tuple[str, Optional[str]]:
     """Extracts text from PDF documents using pypdf."""
+    # Content-based magic bytes validation: PDF must contain %PDF- in header
+    if b"%PDF-" not in raw_bytes[:1024]:
+        raise FileExtractionError(
+            f"File '{filename}' does not contain a valid PDF signature.",
+            status_code=400,
+        )
+
     try:
         import pypdf
     except ImportError:
@@ -196,6 +204,13 @@ def extract_pdf_text(raw_bytes: bytes, filename: str) -> Tuple[str, Optional[str
 
 def extract_docx_text(raw_bytes: bytes, filename: str) -> Tuple[str, Optional[str]]:
     """Extracts text from DOCX documents using python-docx."""
+    # Content-based magic bytes validation: DOCX must start with PK zip container header
+    if not (raw_bytes.startswith(b"PK\x03\x04") or raw_bytes.startswith(b"PK\x05\x06")):
+        raise FileExtractionError(
+            f"File '{filename}' does not contain a valid DOCX container header.",
+            status_code=400,
+        )
+
     try:
         import docx
     except ImportError:

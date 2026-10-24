@@ -66,9 +66,15 @@ class PolicyRepository:
                 )
             return policies
 
-    def get_policy(self, policy_id: str) -> Optional[PolicyRule]:
+    def get_policy(self, policy_id: str, org_id: Optional[str] = None) -> Optional[PolicyRule]:
         with get_db_cursor(self.db_path) as cursor:
-            cursor.execute("SELECT * FROM policies WHERE id = ?", (policy_id,))
+            if org_id and org_id != "default" and org_id != "all":
+                cursor.execute(
+                    "SELECT * FROM policies WHERE id = ? AND (org_id = ? OR org_id = 'default')",
+                    (policy_id, org_id),
+                )
+            else:
+                cursor.execute("SELECT * FROM policies WHERE id = ?", (policy_id,))
             r = cursor.fetchone()
             if not r:
                 return None
@@ -136,20 +142,29 @@ class PolicyRepository:
             )
             return policy
 
-    def toggle_policy(self, policy_id: str, enabled: bool) -> Optional[PolicyRule]:
+    def toggle_policy(self, policy_id: str, enabled: bool, org_id: Optional[str] = None) -> Optional[PolicyRule]:
         now_iso = datetime.now(timezone.utc).isoformat()
         with get_db_cursor(self.db_path) as cursor:
-            cursor.execute(
-                "UPDATE policies SET enabled = ?, updated_at = ? WHERE id = ?",
-                (1 if enabled else 0, now_iso, policy_id),
-            )
+            if org_id and org_id != "default" and org_id != "all":
+                cursor.execute(
+                    "UPDATE policies SET enabled = ?, updated_at = ? WHERE id = ? AND (org_id = ? OR org_id = 'default')",
+                    (1 if enabled else 0, now_iso, policy_id, org_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE policies SET enabled = ?, updated_at = ? WHERE id = ?",
+                    (1 if enabled else 0, now_iso, policy_id),
+                )
             if cursor.rowcount == 0:
                 return None
-        return self.get_policy(policy_id)
+        return self.get_policy(policy_id, org_id=org_id)
 
-    def delete_policy(self, policy_id: str) -> bool:
+    def delete_policy(self, policy_id: str, org_id: Optional[str] = None) -> bool:
         with get_db_cursor(self.db_path) as cursor:
-            cursor.execute("DELETE FROM policies WHERE id = ?", (policy_id,))
+            if org_id and org_id != "default" and org_id != "all":
+                cursor.execute("DELETE FROM policies WHERE id = ? AND org_id = ?", (policy_id, org_id))
+            else:
+                cursor.execute("DELETE FROM policies WHERE id = ?", (policy_id,))
             return cursor.rowcount > 0
 
 
@@ -174,21 +189,23 @@ class ScanRecordRepository:
         finding_count: int,
         categories_detected: List[str],
         processing_duration_ms: float,
+        org_id: str = "default",
     ) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
         with get_db_cursor(self.db_path) as cursor:
             cursor.execute(
                 """
                 INSERT INTO scan_records (
-                    scan_id, timestamp, actor_id, destination, recipient, classification,
+                    scan_id, timestamp, actor_id, org_id, destination, recipient, classification,
                     risk_score, risk_band, final_decision, finding_count,
                     categories_detected, processing_duration_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
                     now_iso,
                     actor_id,
+                    org_id,
                     destination,
                     recipient,
                     classification,
@@ -201,16 +218,22 @@ class ScanRecordRepository:
                 ),
             )
 
-    def get_scan_record(self, scan_id: str) -> Optional[Dict[str, Any]]:
+    def get_scan_record(self, scan_id: str, org_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with get_db_cursor(self.db_path) as cursor:
-            cursor.execute("SELECT * FROM scan_records WHERE scan_id = ?", (scan_id,))
+            if org_id and org_id != "default" and org_id != "all":
+                cursor.execute("SELECT * FROM scan_records WHERE scan_id = ? AND org_id = ?", (scan_id, org_id))
+            else:
+                cursor.execute("SELECT * FROM scan_records WHERE scan_id = ?", (scan_id,))
             r = cursor.fetchone()
             if not r:
                 return None
+            row_keys = r.keys()
+            row_org = r["org_id"] if "org_id" in row_keys else "default"
             return {
                 "scan_id": r["scan_id"],
                 "timestamp": r["timestamp"],
                 "actor_id": r["actor_id"],
+                "org_id": row_org,
                 "destination": r["destination"],
                 "recipient": r["recipient"],
                 "classification": r["classification"],
@@ -229,11 +252,16 @@ class ScanRecordRepository:
         action: Optional[str] = None,
         risk_band: Optional[str] = None,
         destination: Optional[str] = None,
+        org_id: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         query = "SELECT * FROM scan_records WHERE 1=1"
         count_query = "SELECT COUNT(*) AS total FROM scan_records WHERE 1=1"
         params: List[Any] = []
 
+        if org_id and org_id != "all":
+            query += " AND org_id = ?"
+            count_query += " AND org_id = ?"
+            params.append(org_id)
         if action:
             query += " AND final_decision = ?"
             count_query += " AND final_decision = ?"
@@ -258,10 +286,13 @@ class ScanRecordRepository:
             rows = cursor.fetchall()
             records = []
             for r in rows:
+                row_keys = r.keys()
+                row_org = r["org_id"] if "org_id" in row_keys else "default"
                 records.append({
                     "scan_id": r["scan_id"],
                     "timestamp": r["timestamp"],
                     "actor_id": r["actor_id"],
+                    "org_id": row_org,
                     "destination": r["destination"],
                     "recipient": r["recipient"],
                     "classification": r["classification"],
@@ -274,9 +305,15 @@ class ScanRecordRepository:
                 })
             return records, total
 
-    def get_metrics(self) -> Dict[str, Any]:
+    def get_metrics(self, org_id: Optional[str] = None) -> Dict[str, Any]:
         with get_db_cursor(self.db_path) as cursor:
-            cursor.execute("""
+            where_clause = ""
+            params: List[Any] = []
+            if org_id and org_id != "all":
+                where_clause = " WHERE org_id = ?"
+                params.append(org_id)
+
+            cursor.execute(f"""
                 SELECT 
                     COUNT(*) as total_scans,
                     COALESCE(SUM(CASE WHEN final_decision = 'BLOCK' THEN 1 ELSE 0 END), 0) as blocked_count,
@@ -288,7 +325,8 @@ class ScanRecordRepository:
                     COALESCE(AVG(risk_score), 0.0) as avg_risk_score,
                     COALESCE(SUM(finding_count), 0) as total_findings
                 FROM scan_records
-            """)
+                {where_clause}
+            """, params)
             r = cursor.fetchone()
             return {
                 "total_scans": r["total_scans"],

@@ -1,6 +1,7 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 from app.ai.schemas import (
     AIContextAnalysisResult,
+    AIUsageTelemetry,
     RemediationActionType,
     RemediationRecommendation,
 )
@@ -22,6 +23,9 @@ def generate_deterministic_explanation(
     policy_result: PolicyEvaluationResult,
     risk_result: RiskScoreResult,
     failure_reason: str = "AI service unavailable",
+    latency_ms: Optional[float] = None,
+    retries_attempted: int = 0,
+    api_calls_count: int = 0,
 ) -> AIContextAnalysisResult:
     """Generates an explainable security summary and actionable least-privilege remediation
     derived purely from deterministic policy metadata, detector findings, and transfer context.
@@ -152,6 +156,32 @@ def generate_deterministic_explanation(
     human_review = policy_result.final_decision in (PolicyAction.REQUIRE_APPROVAL, PolicyAction.BLOCK) or bool(ambiguities)
 
     status = "UNAVAILABLE" if "not configured" in failure_reason.lower() else "FALLBACK"
+    rate_limited = any(kw in failure_reason.lower() for kw in ["rate limit", "429", "quota", "resource_exhausted"])
+    timed_out = "timeout" in failure_reason.lower()
+    error_type = (
+        "NOT_CONFIGURED" if "not configured" in failure_reason.lower()
+        else ("RATE_LIMIT" if rate_limited
+        else ("TIMEOUT" if timed_out
+        else "PROVIDER_ERROR"))
+    )
+
+    usage = AIUsageTelemetry(
+        prompt_tokens=None,
+        candidates_tokens=None,
+        total_tokens=None,
+        cached_tokens=None,
+        is_estimated=False,
+        operation="context_policy_remediation",
+        api_calls_count=api_calls_count,
+        latency_ms=latency_ms,
+        retries_attempted=retries_attempted,
+        rate_limit_encountered=rate_limited,
+        timeout_encountered=timed_out,
+        error_type=error_type,
+        fallback_reason=failure_reason,
+        provider_status=status,
+        provider_response_id=None,
+    )
 
     return AIContextAnalysisResult(
         incident_summary=summary,
@@ -163,6 +193,7 @@ def generate_deterministic_explanation(
         ai_status=status,
         model_identifier="deterministic-fallback",
         is_ai_assisted=False,
+        usage=usage,
         disclaimer=(
             f"Deterministic fallback active ({failure_reason}). "
             "Policy enforcement decisions and heuristic risk scores remain fully authoritative."

@@ -27,6 +27,7 @@ import {
   Building,
   Check,
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 const PROTECTED_BASELINE_IDS = ['POL-001', 'POL-002', 'POL-003', 'POL-004', 'POL-005'];
 
@@ -62,6 +63,7 @@ const ALL_CLASSIFICATIONS: DataClassification[] = [
 ];
 
 export const PolicyExplorerView: React.FC = () => {
+  const { canManagePolicies, user } = useAuth();
   const [policies, setPolicies] = useState<PolicyRule[]>([]);
   const [selectedOrg, setSelectedOrg] = useState<string>('all');
   const [enabledOnly, setEnabledOnly] = useState<boolean>(false);
@@ -113,7 +115,8 @@ export const PolicyExplorerView: React.FC = () => {
     setFormId(`POL-ORG-${randomSuffix}`);
     setFormName('');
     setFormDescription('');
-    setFormOrgId(selectedOrg !== 'all' ? selectedOrg : 'org_acme');
+    const userOrg = user?.org_id && user.org_id !== 'default' ? user.org_id : (selectedOrg !== 'all' ? selectedOrg : 'org_acme');
+    setFormOrgId(userOrg);
     setFormAction('BLOCK');
     setFormPriority(60);
     setFormIntent('');
@@ -291,12 +294,16 @@ export const PolicyExplorerView: React.FC = () => {
         }}
       >
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', flexWrap: 'wrap' }}>
             <h1 style={{ fontSize: '1.45rem', fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>
               Policy Explorer & Builder
             </h1>
             <span className="badge badge-mono font-mono" style={{ fontSize: '0.68rem' }}>
               {policies.length} Rules Active
+            </span>
+            <span className="badge badge-outline font-mono" style={{ fontSize: '0.68rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <Building size={11} />
+              Active Tenant: {user?.org_id || 'default'}
             </span>
           </div>
           <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', maxWidth: '720px', lineHeight: 1.45 }}>
@@ -342,15 +349,30 @@ export const PolicyExplorerView: React.FC = () => {
             Refresh
           </button>
 
-          <button
-            id="btn-create-policy"
-            className="btn-primary"
-            onClick={handleOpenCreateModal}
-            style={{ fontSize: '0.78rem', padding: '6px 14px' }}
-          >
-            <Plus size={13} strokeWidth={2.5} />
-            Create Policy
-          </button>
+          {canManagePolicies ? (
+            <button
+              id="btn-create-policy"
+              className="btn-primary"
+              onClick={handleOpenCreateModal}
+              style={{ fontSize: '0.78rem', padding: '6px 14px' }}
+            >
+              <Plus size={13} strokeWidth={2.5} />
+              Create Policy
+            </button>
+          ) : (
+            <span
+              style={{
+                fontSize: '0.74rem',
+                padding: '4px 8px',
+                borderRadius: 'var(--radius-xs)',
+                background: '#1c1c1c',
+                border: '1px solid var(--border-subtle)',
+                color: 'var(--text-muted)',
+              }}
+            >
+              Read-Only ({user?.role.toUpperCase()})
+            </span>
+          )}
         </div>
       </div>
 
@@ -454,11 +476,12 @@ export const PolicyExplorerView: React.FC = () => {
                   </span>
                   {p.org_id && p.org_id !== 'default' ? (
                     <span className="badge badge-outline" style={{ fontSize: '0.64rem' }}>
-                      Tenant: {p.org_id}
+                      Org Policy: {p.org_id}
                     </span>
                   ) : (
-                    <span className="badge badge-mono" style={{ fontSize: '0.64rem' }}>
-                      Global
+                    <span className="badge badge-mono" style={{ fontSize: '0.64rem', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                      <Lock size={9} />
+                      Global Baseline
                     </span>
                   )}
                   {p.action === 'BLOCK' && (
@@ -481,26 +504,53 @@ export const PolicyExplorerView: React.FC = () => {
                   </span>
 
                   {/* Toggle Enable/Disable Button */}
-                  <button
-                    className="btn-ghost"
-                    onClick={() => handleTogglePolicy(p)}
-                    title={p.enabled ? 'Click to disable' : 'Click to enable'}
-                    style={{ fontSize: '0.75rem', padding: '4px 6px' }}
-                  >
-                    {p.enabled ? (
-                      <ToggleRight size={18} color="#ffffff" />
-                    ) : (
-                      <ToggleLeft size={18} color="var(--text-muted)" />
-                    )}
-                  </button>
+                  {(() => {
+                    const isImmutableBaseline = isBaseline && user?.org_id !== 'default';
+                    const canToggle = canManagePolicies && !isImmutableBaseline;
+                    return (
+                      <button
+                        className="btn-ghost"
+                        disabled={!canToggle}
+                        onClick={() => handleTogglePolicy(p)}
+                        title={
+                          isImmutableBaseline
+                            ? 'Global baseline policies are immutable and cannot be toggled by tenant administrators'
+                            : !canManagePolicies
+                            ? 'Administrator privileges required to toggle policies'
+                            : p.enabled
+                            ? 'Click to disable'
+                            : 'Click to enable'
+                        }
+                        style={{
+                          fontSize: '0.75rem',
+                          padding: '4px 6px',
+                          opacity: canToggle ? 1 : 0.35,
+                          cursor: canToggle ? 'pointer' : 'not-allowed',
+                        }}
+                      >
+                        {p.enabled ? (
+                          <ToggleRight size={18} color="#ffffff" />
+                        ) : (
+                          <ToggleLeft size={18} color="var(--text-muted)" />
+                        )}
+                      </button>
+                    );
+                  })()}
 
-                  {/* Delete button (only for custom rules) */}
+                  {/* Delete button (only for custom tenant rules) */}
                   {!isBaseline && (
                     <button
                       className="btn-ghost"
+                      disabled={!canManagePolicies}
                       onClick={() => handleDeletePolicy(p.id)}
-                      title="Delete custom rule"
-                      style={{ fontSize: '0.75rem', padding: '4px 6px', color: '#a3a3a3' }}
+                      title={!canManagePolicies ? 'Administrator privileges required to delete policies' : 'Delete custom rule'}
+                      style={{
+                        fontSize: '0.75rem',
+                        padding: '4px 6px',
+                        color: '#a3a3a3',
+                        opacity: canManagePolicies ? 1 : 0.4,
+                        cursor: canManagePolicies ? 'pointer' : 'not-allowed',
+                      }}
                     >
                       <Trash2 size={13} />
                     </button>
@@ -667,16 +717,25 @@ export const PolicyExplorerView: React.FC = () => {
                   <label style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', marginBottom: '4px' }}>
                     Tenant Organization *
                   </label>
-                  <select
-                    value={formOrgId}
-                    onChange={(e) => setFormOrgId(e.target.value)}
-                    style={{ width: '100%', fontSize: '0.82rem' }}
-                  >
-                    <option value="org_acme">Acme Corp (org_acme)</option>
-                    <option value="org_cybershield">CyberShield (org_cybershield)</option>
-                    <option value="org_fintech">FinTech Secure (org_fintech)</option>
-                    <option value="default">Global (default)</option>
-                  </select>
+                  {user?.org_id && user.org_id !== 'default' ? (
+                    <input
+                      type="text"
+                      disabled
+                      value={`${user.org_id} (Locked to your organization)`}
+                      style={{ width: '100%', fontSize: '0.82rem', opacity: 0.7, cursor: 'not-allowed' }}
+                    />
+                  ) : (
+                    <select
+                      value={formOrgId}
+                      onChange={(e) => setFormOrgId(e.target.value)}
+                      style={{ width: '100%', fontSize: '0.82rem' }}
+                    >
+                      <option value="org_acme">Acme Corp (org_acme)</option>
+                      <option value="org_cybershield">CyberShield (org_cybershield)</option>
+                      <option value="org_fintech">FinTech Secure (org_fintech)</option>
+                      <option value="default">Global (default)</option>
+                    </select>
+                  )}
                 </div>
 
                 <div>

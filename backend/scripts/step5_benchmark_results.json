@@ -1,0 +1,117 @@
+{
+  "records": [
+    {
+      "id": "SEQ-01",
+      "name": "Clean Internal Memo",
+      "scan_id": "scan_1792772276677_b3cd65ea49",
+      "deterministic_decision": "ALLOW",
+      "risk_score": 8,
+      "e2e_latency_ms": 6555.89,
+      "provider_latency_ms": 3751.07,
+      "deterministic_latency_ms": 0.2,
+      "ai_status": "SUCCESS",
+      "is_ai_assisted": true,
+      "prompt_tokens": 658,
+      "candidates_tokens": 281,
+      "total_tokens": 939,
+      "retries_attempted": 0,
+      "actual_provider_attempts": 1,
+      "rate_limit_encountered": false
+    },
+    {
+      "id": "SEQ-02",
+      "name": "External SaaS Email Transfer",
+      "scan_id": "scan_1792772284522_628054e53c",
+      "deterministic_decision": "REQUIRE_APPROVAL",
+      "risk_score": 52,
+      "e2e_latency_ms": 5611.14,
+      "provider_latency_ms": 4084.1,
+      "deterministic_latency_ms": 0.32,
+      "ai_status": "SUCCESS",
+      "is_ai_assisted": true,
+      "prompt_tokens": 740,
+      "candidates_tokens": 471,
+      "total_tokens": 1211,
+      "retries_attempted": 0,
+      "actual_provider_attempts": 1,
+      "rate_limit_encountered": false
+    },
+    {
+      "id": "SEQ-03",
+      "name": "Public LLM OpenAI Key Query",
+      "scan_id": "scan_1792772291635_9cefda9488",
+      "deterministic_decision": "BLOCK",
+      "risk_score": 90,
+      "e2e_latency_ms": 6387.48,
+      "provider_latency_ms": 4987.39,
+      "deterministic_latency_ms": 0.55,
+      "ai_status": "SUCCESS",
+      "is_ai_assisted": true,
+      "prompt_tokens": 740,
+      "candidates_tokens": 483,
+      "total_tokens": 1223,
+      "retries_attempted": 0,
+      "actual_provider_attempts": 1,
+      "rate_limit_encountered": false
+    },
+    {
+      "id": "SEQ-04",
+      "name": "Unspecified Destination Missing Context",
+      "scan_id": "scan_1792772299522_12982f83d0",
+      "deterministic_decision": "REQUIRE_APPROVAL",
+      "risk_score": 48,
+      "e2e_latency_ms": 46950.63,
+      "provider_latency_ms": 45520.66,
+      "deterministic_latency_ms": 0.25,
+      "ai_status": "SUCCESS",
+      "is_ai_assisted": true,
+      "prompt_tokens": 714,
+      "candidates_tokens": 473,
+      "total_tokens": 1187,
+      "retries_attempted": 2,
+      "actual_provider_attempts": 3,
+      "rate_limit_encountered": false
+    },
+    {
+      "id": "SEQ-05",
+      "name": "Multi-Entity Exfiltration Check",
+      "scan_id": "scan_1792772347977_53558da38f",
+      "deterministic_decision": "BLOCK",
+      "risk_score": 100,
+      "e2e_latency_ms": 58853.14,
+      "provider_latency_ms": 57514.62,
+      "deterministic_latency_ms": 0.58,
+      "ai_status": "SUCCESS",
+      "is_ai_assisted": true,
+      "prompt_tokens": 907,
+      "candidates_tokens": 604,
+      "total_tokens": 1511,
+      "retries_attempted": 0,
+      "actual_provider_attempts": 1,
+      "rate_limit_encountered": false
+    }
+  ],
+  "statistics": {
+    "sample_size": 5,
+    "e2e_latency_ms": {
+      "min": 5611.14,
+      "median": 6555.89,
+      "p95": 56472.64,
+      "max": 58853.14
+    },
+    "provider_latency_ms": {
+      "min": 3751.07,
+      "median": 4987.39,
+      "p95": 55115.83,
+      "max": 57514.62
+    },
+    "deterministic_latency_ms": {
+      "min": 0.2,
+      "median": 0.32,
+      "max": 0.58
+    },
+    "provider_latency_share_percent": 76.1,
+    "total_tokens_consumed": 6071,
+    "avg_tokens_per_scan": 1214.2
+  }
+}

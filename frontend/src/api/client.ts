@@ -15,6 +15,94 @@ export interface HealthCheckResult {
   error: string | null;
 }
 
+export type UserRole = 'admin' | 'analyst' | 'viewer';
+
+export interface UserResponse {
+  id: string;
+  username: string;
+  email: string;
+  role: UserRole;
+  org_id: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  last_login_at?: string | null;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in_minutes: number;
+  user: UserResponse;
+}
+
+export interface BootstrapStatusResponse {
+  requires_bootstrap: boolean;
+  user_count: number;
+}
+
+export interface RegistrationStatusResponse {
+  allow_public_registration: boolean;
+  registration_mode: 'public' | 'admin_provisioned';
+  message: string;
+}
+
+export interface RegisterRequest {
+  username: string;
+  email: string;
+  password: string;
+  org_id?: string;
+}
+
+// In-memory token management with sessionStorage fallback (safe against CSRF and cross-tab persistence)
+const AUTH_TOKEN_KEY = 'datashield_soc_auth_token';
+let inMemoryToken: string | null = typeof window !== 'undefined' ? sessionStorage.getItem(AUTH_TOKEN_KEY) : null;
+
+export function getAuthToken(): string | null {
+  return inMemoryToken;
+}
+
+export function setAuthToken(token: string | null): void {
+  inMemoryToken = token;
+  if (typeof window !== 'undefined') {
+    if (token) {
+      sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+    } else {
+      sessionStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+  }
+}
+
+let onUnauthorizedCallback: (() => void) | null = null;
+export function setOnUnauthorizedCallback(cb: (() => void) | null) {
+  onUnauthorizedCallback = cb;
+}
+
+async function authenticatedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const token = getAuthToken();
+  if (!token) {
+    throw new Error('Authentication required: No active session token.');
+  }
+
+  const headers = new Headers(init?.headers || {});
+  if (!headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  const response = await fetch(input, {
+    ...init,
+    headers,
+  });
+
+  if (response.status === 401) {
+    if (onUnauthorizedCallback) {
+      onUnauthorizedCallback();
+    }
+  }
+
+  return response;
+}
+
 export async function checkBackendHealth(): Promise<HealthCheckResult> {
   const start = performance.now();
   try {
@@ -126,6 +214,24 @@ export interface RemediationRecommendation {
   is_advisory: boolean;
 }
 
+export interface AIUsageTelemetry {
+  prompt_tokens?: number | null;
+  candidates_tokens?: number | null;
+  total_tokens?: number | null;
+  cached_tokens?: number | null;
+  is_estimated: boolean;
+  operation: string;
+  api_calls_count: number;
+  latency_ms?: number | null;
+  retries_attempted: number;
+  rate_limit_encountered: boolean;
+  timeout_encountered: boolean;
+  error_type?: string | null;
+  fallback_reason?: string | null;
+  provider_status: string;
+  provider_response_id?: string | null;
+}
+
 export interface AIContextAnalysisResult {
   incident_summary: string;
   relevant_risk_factors: string[];
@@ -136,6 +242,7 @@ export interface AIContextAnalysisResult {
   ai_status: 'SUCCESS' | 'FALLBACK' | 'UNAVAILABLE';
   model_identifier?: string;
   is_ai_assisted: boolean;
+  usage?: AIUsageTelemetry;
   disclaimer: string;
 }
 
@@ -237,7 +344,7 @@ export async function scanTextPayload(
   options?: { enable_entropy?: boolean; redaction_mode?: string },
   context?: SharingContext
 ): Promise<ScanResponse> {
-  const response = await fetch('/api/v1/scan/text', {
+  const response = await authenticatedFetch('/api/v1/scan/text', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -276,7 +383,7 @@ export async function scanFilePayload(
     formData.append('context_json', JSON.stringify(context));
   }
 
-  const response = await fetch('/api/v1/scan/file', {
+  const response = await authenticatedFetch('/api/v1/scan/file', {
     method: 'POST',
     headers: {
       'Accept': 'application/json',
@@ -300,7 +407,7 @@ export async function scanFilePayload(
 }
 
 export async function verifyAuditChain(): Promise<AuditVerificationResult> {
-  const response = await fetch('/api/v1/audit/verify', {
+  const response = await authenticatedFetch('/api/v1/audit/verify', {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -321,7 +428,7 @@ export async function fetchPolicies(orgId?: string, enabledOnly: boolean = false
   if (orgId && orgId !== 'all') params.append('org_id', orgId);
   const queryStr = params.toString() ? `?${params.toString()}` : '';
 
-  const response = await fetch(`/api/v1/policies${queryStr}`, {
+  const response = await authenticatedFetch(`/api/v1/policies${queryStr}`, {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -337,7 +444,7 @@ export async function fetchPolicies(orgId?: string, enabledOnly: boolean = false
 }
 
 export async function createPolicy(rule: Partial<PolicyRule> & { id: string; name: string; action: PolicyAction }): Promise<PolicyRule> {
-  const response = await fetch('/api/v1/policies', {
+  const response = await authenticatedFetch('/api/v1/policies', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -363,7 +470,7 @@ export async function createPolicy(rule: Partial<PolicyRule> & { id: string; nam
 
 export async function togglePolicy(policyId: string, enabled?: boolean): Promise<{ message: string; policy_id: string; enabled: boolean }> {
   const query = enabled !== undefined ? `?enabled=${enabled}` : '';
-  const response = await fetch(`/api/v1/policies/${encodeURIComponent(policyId)}/toggle${query}`, {
+  const response = await authenticatedFetch(`/api/v1/policies/${encodeURIComponent(policyId)}/toggle${query}`, {
     method: 'PATCH',
     headers: {
       'Accept': 'application/json',
@@ -386,7 +493,7 @@ export async function togglePolicy(policyId: string, enabled?: boolean): Promise
 }
 
 export async function deletePolicy(policyId: string): Promise<{ message: string; policy_id: string }> {
-  const response = await fetch(`/api/v1/policies/${encodeURIComponent(policyId)}`, {
+  const response = await authenticatedFetch(`/api/v1/policies/${encodeURIComponent(policyId)}`, {
     method: 'DELETE',
     headers: {
       'Accept': 'application/json',
@@ -409,7 +516,7 @@ export async function deletePolicy(policyId: string): Promise<{ message: string;
 }
 
 export async function fetchAuditEvents(limit: number = 50, offset: number = 0): Promise<AuditEventsPage> {
-  const response = await fetch(`/api/v1/audit/events?limit=${limit}&offset=${offset}`, {
+  const response = await authenticatedFetch(`/api/v1/audit/events?limit=${limit}&offset=${offset}`, {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -437,7 +544,7 @@ export async function fetchScanRecords(
   if (filters?.risk_band) params.append('risk_band', filters.risk_band);
   if (filters?.destination) params.append('destination', filters.destination);
 
-  const response = await fetch(`/api/v1/scan/records?${params.toString()}`, {
+  const response = await authenticatedFetch(`/api/v1/scan/records?${params.toString()}`, {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -453,7 +560,7 @@ export async function fetchScanRecords(
 }
 
 export async function fetchScanRecordDetail(scanId: string): Promise<ScanRecordDetail> {
-  const response = await fetch(`/api/v1/scan/records/${encodeURIComponent(scanId)}`, {
+  const response = await authenticatedFetch(`/api/v1/scan/records/${encodeURIComponent(scanId)}`, {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -469,7 +576,7 @@ export async function fetchScanRecordDetail(scanId: string): Promise<ScanRecordD
 }
 
 export async function fetchSOCMetrics(): Promise<SOCMetrics> {
-  const response = await fetch('/api/v1/scan/metrics', {
+  const response = await authenticatedFetch('/api/v1/scan/metrics', {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -482,4 +589,221 @@ export async function fetchSOCMetrics(): Promise<SOCMetrics> {
   }
 
   return response.json();
+}
+
+// ---------------------------------------------------------------------------
+// Authentication & User Management API Methods
+// ---------------------------------------------------------------------------
+
+export async function checkBootstrapStatus(): Promise<BootstrapStatusResponse> {
+  const res = await fetch('/api/v1/auth/bootstrap-status');
+  if (!res.ok) {
+    throw new Error(`Failed to verify bootstrap status: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function checkRegistrationStatus(): Promise<RegistrationStatusResponse> {
+  const res = await fetch('/api/v1/auth/registration-status');
+  if (!res.ok) {
+    throw new Error(`Failed to verify registration status: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function registerUser(payload: RegisterRequest): Promise<UserResponse> {
+  const res = await fetch('/api/v1/auth/register', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    let detail = 'Registration failed';
+    try {
+      const err = await res.json();
+      detail = err.detail || detail;
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  return res.json();
+}
+
+export async function setupInitialAdmin(payload: {
+  username: string;
+  email: string;
+  password: string;
+}): Promise<TokenResponse> {
+  const res = await fetch('/api/v1/auth/setup-admin', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const err = await res.json();
+      detail = err.detail || JSON.stringify(err);
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  const data: TokenResponse = await res.json();
+  setAuthToken(data.access_token);
+  return data;
+}
+
+export async function loginUser(payload: {
+  username: string;
+  password: string;
+}): Promise<TokenResponse> {
+  const res = await fetch('/api/v1/auth/login', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    let detail = 'Authentication failed';
+    try {
+      const err = await res.json();
+      detail = err.detail || detail;
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  const data: TokenResponse = await res.json();
+  setAuthToken(data.access_token);
+  return data;
+}
+
+export async function logoutUser(): Promise<void> {
+  try {
+    await authenticatedFetch('/api/v1/auth/logout', { method: 'POST' });
+  } catch {
+    // Ignore network errors on logout
+  } finally {
+    setAuthToken(null);
+  }
+}
+
+export async function getCurrentUser(): Promise<UserResponse> {
+  const res = await authenticatedFetch('/api/v1/auth/me');
+  if (!res.ok) {
+    throw new Error('Not authenticated');
+  }
+  return res.json();
+}
+
+export async function fetchUsers(): Promise<UserResponse[]> {
+  const res = await authenticatedFetch('/api/v1/users');
+  if (!res.ok) {
+    let detail = 'Failed to load user list';
+    try {
+      const err = await res.json();
+      detail = err.detail || detail;
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+export async function createUser(payload: {
+  username: string;
+  email: string;
+  password: string;
+  role: UserRole;
+  org_id?: string;
+}): Promise<UserResponse> {
+  const res = await authenticatedFetch('/api/v1/users', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    let detail = 'Failed to create user';
+    try {
+      const err = await res.json();
+      detail = err.detail || detail;
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+export async function updateUser(
+  userId: string,
+  payload: {
+    email?: string;
+    role?: UserRole;
+    is_active?: boolean;
+    password?: string;
+    org_id?: string;
+  }
+): Promise<UserResponse> {
+  const res = await authenticatedFetch(`/api/v1/users/${encodeURIComponent(userId)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    let detail = 'Failed to update user';
+    try {
+      const err = await res.json();
+      detail = err.detail || detail;
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+export async function deleteUser(userId: string): Promise<void> {
+  const res = await authenticatedFetch(`/api/v1/users/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+  });
+
+  if (!res.ok) {
+    let detail = 'Failed to delete user';
+    try {
+      const err = await res.json();
+      detail = err.detail || detail;
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
 }

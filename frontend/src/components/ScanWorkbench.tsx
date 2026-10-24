@@ -72,6 +72,18 @@ const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
 
 type InputTab = 'text' | 'file' | 'sample';
 
+export type FileScanPhase =
+  | 'idle'
+  | 'selecting'
+  | 'ready'
+  | 'uploading'
+  | 'scanning'
+  | 'success'
+  | 'unsupported_format'
+  | 'file_too_large'
+  | 'extraction_failure'
+  | 'server_error';
+
 export const ScanWorkbench: React.FC = () => {
   // Input mode & payload state
   const [activeTab, setActiveTab] = useState<InputTab>('text');
@@ -79,6 +91,7 @@ export const ScanWorkbench: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [filePreviewText, setFilePreviewText] = useState<string>('');
   const [fileError, setFileError] = useState<string | null>(null);
+  const [fileScanPhase, setFileScanPhase] = useState<FileScanPhase>('idle');
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -106,6 +119,7 @@ export const ScanWorkbench: React.FC = () => {
     setFilePreviewText('');
 
     if (file.size > MAX_FILE_SIZE_BYTES) {
+      setFileScanPhase('file_too_large');
       setFileError(`File size exceeds 5 MB limit (${(file.size / (1024 * 1024)).toFixed(2)} MB). Please select a smaller file.`);
       setSelectedFile(null);
       return;
@@ -113,12 +127,14 @@ export const ScanWorkbench: React.FC = () => {
 
     const ext = '.' + file.name.split('.').pop()?.toLowerCase();
     if (!SUPPORTED_EXTENSIONS.includes(ext)) {
+      setFileScanPhase('unsupported_format');
       setFileError(`Unsupported file format "${ext}". Supported types: ${SUPPORTED_EXTENSIONS.join(', ')}`);
       setSelectedFile(null);
       return;
     }
 
     setSelectedFile(file);
+    setFileScanPhase('ready');
 
     // Client-side preview for text files
     if (['.txt', '.log', '.csv', '.json', '.yaml', '.yml', '.xml', '.md', '.html', '.css', '.js', '.ts', '.py', '.java', '.sql', '.env', '.ini', '.conf', '.properties'].includes(ext)) {
@@ -164,6 +180,7 @@ export const ScanWorkbench: React.FC = () => {
     setSelectedFile(null);
     setFilePreviewText('');
     setFileError(null);
+    setFileScanPhase('idle');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -191,11 +208,21 @@ export const ScanWorkbench: React.FC = () => {
       if (activeTab === 'file') {
         if (!selectedFile) {
           setError('Please select or upload a valid file to analyze.');
+          setFileScanPhase('idle');
           setLoading(false);
           return;
         }
+
+        setFileScanPhase('uploading');
+        // Visually transition to scanning
+        const timer = setTimeout(() => {
+          setFileScanPhase((curr) => (curr === 'uploading' ? 'scanning' : curr));
+        }, 180);
+
         const data = await scanFilePayload(selectedFile, options, sharingContext);
+        clearTimeout(timer);
         setResult(data);
+        setFileScanPhase('success');
       } else {
         if (!inputText.trim()) {
           setError('Please enter or paste text to analyze.');
@@ -206,7 +233,24 @@ export const ScanWorkbench: React.FC = () => {
         setResult(data);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Analysis failed');
+      const msg = err instanceof Error ? err.message : 'Analysis failed';
+      setError(msg);
+      if (activeTab === 'file') {
+        const lowerMsg = msg.toLowerCase();
+        if (msg.includes('413') || lowerMsg.includes('exceeds')) {
+          setFileScanPhase('file_too_large');
+          setFileError(msg);
+        } else if (msg.includes('415') || lowerMsg.includes('unsupported file format')) {
+          setFileScanPhase('unsupported_format');
+          setFileError(msg);
+        } else if (msg.includes('500') || lowerMsg.includes('server error') || lowerMsg.includes('failed to fetch')) {
+          setFileScanPhase('server_error');
+          setFileError(msg);
+        } else {
+          setFileScanPhase('extraction_failure');
+          setFileError(msg);
+        }
+      }
     } finally {
       setLoading(false);
     }
@@ -407,10 +451,32 @@ export const ScanWorkbench: React.FC = () => {
         {/* Tab 2: Upload File */}
         {activeTab === 'file' && (
           <div style={{ marginBottom: '16px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <label style={{ fontSize: '0.74rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                Document or Code Upload
-              </label>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', flexWrap: 'wrap', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <label style={{ fontSize: '0.74rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Document or Code Upload
+                </label>
+                {fileScanPhase === 'uploading' && (
+                  <span className="badge badge-outline" style={{ fontSize: '0.68rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <RefreshCw size={10} className="animate-spin" /> Uploading Payload...
+                  </span>
+                )}
+                {fileScanPhase === 'scanning' && (
+                  <span className="badge badge-outline" style={{ fontSize: '0.68rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <RefreshCw size={10} className="animate-spin" /> Extracting Text & DLP Scanning...
+                  </span>
+                )}
+                {fileScanPhase === 'ready' && (
+                  <span className="badge badge-allow" style={{ fontSize: '0.66rem' }}>
+                    Ready for Scan
+                  </span>
+                )}
+                {fileScanPhase === 'success' && (
+                  <span className="badge badge-allow" style={{ fontSize: '0.66rem' }}>
+                    ✓ Scan Complete
+                  </span>
+                )}
+              </div>
               <span className="font-mono text-muted" style={{ fontSize: '0.72rem' }}>
                 Max 5 MB • Safe Text Extraction
               </span>
@@ -424,6 +490,36 @@ export const ScanWorkbench: React.FC = () => {
               style={{ display: 'none' }}
               accept={SUPPORTED_EXTENSIONS.join(',')}
             />
+
+            {/* Uploading or Scanning In-Progress Indicator Banner */}
+            {(fileScanPhase === 'uploading' || fileScanPhase === 'scanning') && (
+              <div
+                style={{
+                  background: 'var(--bg-surface)',
+                  border: '1px solid var(--border-strong)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '14px 18px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '14px',
+                  marginBottom: '12px',
+                }}
+              >
+                <RefreshCw size={18} className="animate-spin" color="#ffffff" />
+                <div>
+                  <div style={{ fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                    {fileScanPhase === 'uploading'
+                      ? 'Streaming File Payload to Secure Memory...'
+                      : 'Extracting Plain Text & Evaluating DLP Policies...'}
+                  </div>
+                  <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>
+                    {fileScanPhase === 'uploading'
+                      ? 'File bytes are safely read into bounded memory with zero temporary disk retention.'
+                      : 'Running regex detectors, Shannon entropy, Luhn validator, and advisory AI analysis.'}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {!selectedFile ? (
               /* Dropzone */
@@ -534,20 +630,31 @@ export const ScanWorkbench: React.FC = () => {
             {fileError && (
               <div
                 style={{
-                  padding: '10px 14px',
+                  padding: '12px 16px',
                   background: 'var(--bg-surface)',
                   border: '1px solid #737373',
                   borderRadius: 'var(--radius-sm)',
                   color: '#f5f5f5',
-                  fontSize: '0.8rem',
+                  fontSize: '0.82rem',
                   display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
+                  flexDirection: 'column',
+                  gap: '6px',
                   marginBottom: '12px',
                 }}
               >
-                <AlertTriangle size={14} color="#ffffff" />
-                <span>{fileError}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <AlertTriangle size={15} color="#ffffff" />
+                  <span style={{ fontWeight: 600 }}>
+                    {fileScanPhase === 'unsupported_format' && 'Unsupported Format Error (415)'}
+                    {fileScanPhase === 'file_too_large' && 'File Size Limit Exceeded (413)'}
+                    {fileScanPhase === 'extraction_failure' && 'Text Extraction Failure (400)'}
+                    {fileScanPhase === 'server_error' && 'Server Scan Error (500)'}
+                    {(!['unsupported_format', 'file_too_large', 'extraction_failure', 'server_error'].includes(fileScanPhase)) && 'File Validation Error'}
+                  </span>
+                </div>
+                <div style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', paddingLeft: '23px', lineHeight: 1.4 }}>
+                  {fileError}
+                </div>
               </div>
             )}
           </div>
@@ -781,7 +888,13 @@ export const ScanWorkbench: React.FC = () => {
             {loading ? (
               <>
                 <RefreshCw size={14} className="animate-spin" />
-                <span>Evaluating...</span>
+                <span>
+                  {activeTab === 'file'
+                    ? fileScanPhase === 'uploading'
+                      ? 'Uploading Payload...'
+                      : 'Scanning & Evaluating...'
+                    : 'Evaluating...'}
+                </span>
               </>
             ) : (
               <>
@@ -915,8 +1028,55 @@ export const ScanWorkbench: React.FC = () => {
             </div>
           </div>
 
-          {/* Optional Extraction Note Banner */}
-          {result.extraction_note && (
+          {/* File Extraction & Inspection Banner */}
+          {result.source_type === 'file' && (
+            <div
+              className="card"
+              style={{
+                padding: '12px 18px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: '12px',
+                background: 'var(--bg-surface)',
+                border: '1px solid var(--border-primary)',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                {getFileIcon(result.filename || 'document.txt')}
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                      {result.filename || 'Uploaded File'}
+                    </span>
+                    <span className="badge badge-mono" style={{ fontSize: '0.65rem' }}>
+                      In-Memory Safe Extraction
+                    </span>
+                    <span className="badge badge-outline" style={{ fontSize: '0.65rem' }}>
+                      Zero Disk Retention
+                    </span>
+                    <span className="badge badge-allow" style={{ fontSize: '0.65rem' }}>
+                      Extraction Verified
+                    </span>
+                  </div>
+                  {result.extraction_note && (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                      {result.extraction_note}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {result.file_size_bytes ? (
+                <span className="font-mono text-muted" style={{ fontSize: '0.74rem' }}>
+                  {(result.file_size_bytes / 1024).toFixed(1)} KB payload
+                </span>
+              ) : null}
+            </div>
+          )}
+
+          {/* Optional Extraction Note Banner for non-file if present */}
+          {result.source_type !== 'file' && result.extraction_note && (
             <div
               className="card"
               style={{
@@ -1097,6 +1257,11 @@ export const ScanWorkbench: React.FC = () => {
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontStyle: 'italic' }}>
                           Intent: {p.intent_explanation}
                         </div>
+                        {result.ai_analysis?.policy_rationales && result.ai_analysis.policy_rationales[p.id] && (
+                          <div style={{ fontSize: '0.74rem', color: '#93c5fd', marginTop: '6px', background: 'rgba(59, 130, 246, 0.08)', padding: '6px 10px', borderRadius: 'var(--radius-sm)', borderLeft: '3px solid #3b82f6', lineHeight: 1.4 }}>
+                            <span style={{ fontWeight: 600, color: '#bfdbfe' }}>Policy Rationale:</span> {result.ai_analysis.policy_rationales[p.id]}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1157,141 +1322,203 @@ export const ScanWorkbench: React.FC = () => {
 
               {/* Advisory AI Context Analysis Panel */}
               {result.ai_analysis && (
-                <div className="card" style={{ padding: '20px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <Bot size={16} color="#ffffff" strokeWidth={1.8} />
-                      <h3 style={{ fontSize: '0.96rem', fontWeight: 600, margin: 0 }}>
+                <div className="card ai-analysis-card">
+                  {/* Header Row: Heading, Icon, and Gemini Active status badge on the same horizontal row */}
+                  <div className="ai-header-row">
+                    <div className="ai-header-title-group">
+                      <Bot size={16} color="#ffffff" strokeWidth={1.8} className="ai-header-icon" />
+                      <h3 className="ai-header-title">
                         Advisory AI Context Analysis
                       </h3>
                     </div>
 
-                    <span className="badge badge-mono" style={{ fontSize: '0.68rem' }}>
+                    <span className="badge badge-mono ai-header-badge">
                       {result.ai_analysis.is_ai_assisted
-                        ? `Gemini Active (${result.ai_analysis.model_identifier || 'gemini-2.5-flash'})`
+                        ? `Gemini Active (${result.ai_analysis.model_identifier || 'gemini-3.1-flash-lite'})`
                         : `Fallback Mode (${result.ai_analysis.ai_status})`}
                     </span>
                   </div>
 
-                  {/* Context Assessment */}
-                  <div
-                    style={{
-                      padding: '12px 14px',
-                      background: 'var(--bg-surface)',
-                      borderRadius: 'var(--radius-sm)',
-                      border: '1px solid var(--border-subtle)',
-                      marginBottom: '14px',
-                    }}
-                  >
-                    <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px' }}>
-                      Context Assessment
-                    </div>
-                    <div style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                      {result.ai_analysis.incident_summary}
-                    </div>
-                  </div>
-
-                  {/* Human Review & Compact Risk Factors */}
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px', marginBottom: '14px' }}>
-                    <div
-                      style={{
-                        padding: '10px 12px',
-                        background: 'var(--bg-surface)',
-                        borderRadius: 'var(--radius-sm)',
-                        border: '1px solid var(--border-subtle)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                      }}
-                    >
-                      {result.ai_analysis.human_review_recommended ? (
-                        <UserCheck size={16} color="#ffffff" />
-                      ) : (
-                        <CheckCircle2 size={16} color="var(--text-muted)" />
-                      )}
-                      <div>
-                        <div style={{ fontSize: '0.76rem', fontWeight: 600 }}>
-                          {result.ai_analysis.human_review_recommended ? 'Human Review Advised' : 'Automated Clearance'}
+                  <div className="ai-content-layout">
+                    {/* Full-width Context Assessment Panel */}
+                    <div className="ai-panel ai-context-panel">
+                      <div className="ai-panel-label">
+                        Context Assessment
+                      </div>
+                      <div className="ai-context-summary">
+                        {result.ai_analysis.incident_summary || 'Context analysis complete.'}
+                      </div>
+                      {Array.isArray(result.ai_analysis.ambiguities_and_uncertainty) && result.ai_analysis.ambiguities_and_uncertainty.length > 0 && (
+                        <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--border-subtle)' }}>
+                          <div style={{ fontSize: '0.68rem', fontWeight: 600, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>
+                            Contextual Ambiguities & Uncertainty
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            {result.ai_analysis.ambiguities_and_uncertainty.map((amb, idx) => (
+                              <div key={idx} style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
+                                <span style={{ color: '#f59e0b', flexShrink: 0 }}>⚠️</span>
+                                <span>{amb}</span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
-                        <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
-                          {result.ai_analysis.human_review_recommended ? 'Analyst sign-off required' : 'Low risk profile'}
+                      )}
+                    </div>
+
+                    {/* Two-Column Row: Human Review Advised & Identified Risk Factors */}
+                    <div className="ai-two-column-row">
+                      {/* Left: Human Review Status Card */}
+                      <div className="ai-panel ai-review-card">
+                        <div className="ai-panel-label">
+                          Human Review Recommendation
+                        </div>
+                        <div className="ai-review-content">
+                          <div className="ai-review-icon-wrap">
+                            {result.ai_analysis.human_review_recommended ? (
+                              <UserCheck size={18} color="#ffffff" />
+                            ) : (
+                              <CheckCircle2 size={18} color="var(--text-muted)" />
+                            )}
+                          </div>
+                          <div className="ai-review-text-group">
+                            <div className="ai-review-headline">
+                              {result.ai_analysis.human_review_recommended ? 'Human Review Advised' : 'Automated Clearance'}
+                            </div>
+                            <div className="ai-review-subtext">
+                              {result.ai_analysis.human_review_recommended ? 'Analyst sign-off required' : 'Low risk profile'}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Right: Identified Risk Factors Card */}
+                      <div className="ai-panel ai-risk-card">
+                        <div className="ai-panel-label">
+                          Identified Risk Factors
+                        </div>
+                        <div className="ai-risk-factors-content">
+                          {Array.isArray(result.ai_analysis.relevant_risk_factors) && result.ai_analysis.relevant_risk_factors.length > 0 ? (
+                            <div className="ai-risk-badges-wrap">
+                              {result.ai_analysis.relevant_risk_factors.map((rf, idx) => (
+                                <span key={idx} className="badge badge-mono ai-risk-badge">
+                                  {rf}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="ai-empty-text">
+                              Standard risk baseline — no elevated contextual risk factors detected
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
 
-                    {result.ai_analysis.relevant_risk_factors.length > 0 && (
-                      <div
-                        style={{
-                          padding: '10px 12px',
-                          background: 'var(--bg-surface)',
-                          borderRadius: 'var(--radius-sm)',
-                          border: '1px solid var(--border-subtle)',
-                        }}
-                      >
-                        <div style={{ fontSize: '0.68rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '6px' }}>
-                          Identified Risk Factors
+                    {/* Policy Explanation Panel */}
+                    {result.ai_analysis.policy_rationales && Object.keys(result.ai_analysis.policy_rationales).length > 0 && (
+                      <div className="ai-panel ai-policy-panel">
+                        <div className="ai-panel-label">
+                          Policy Explanations ({Object.keys(result.ai_analysis.policy_rationales).length})
                         </div>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                          {result.ai_analysis.relevant_risk_factors.map((rf, idx) => (
-                            <span key={idx} className="badge badge-mono" style={{ fontSize: '0.64rem', padding: '2px 6px' }}>
-                              {rf}
-                            </span>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                          {Object.entries(result.ai_analysis.policy_rationales).map(([pid, rationale]) => (
+                            <div key={pid} style={{ fontSize: '0.8rem', lineHeight: 1.4, padding: '8px 10px', background: 'rgba(255, 255, 255, 0.02)', borderRadius: 'var(--radius-sm)', borderLeft: '3px solid #3b82f6' }}>
+                              <span className="font-mono" style={{ color: '#60a5fa', fontWeight: 600, marginRight: '8px' }}>{pid}:</span>
+                              <span style={{ color: 'var(--text-secondary)' }}>{rationale}</span>
+                            </div>
                           ))}
                         </div>
                       </div>
                     )}
-                  </div>
 
-                  {/* Advisory Least-Privilege Remediation Plan */}
-                  {result.ai_analysis.remediation_recommendations && result.ai_analysis.remediation_recommendations.length > 0 && (
-                    <div style={{ marginBottom: '14px' }}>
-                      <div style={{ fontSize: '0.74rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>
-                        Advisory Remediation ({result.ai_analysis.remediation_recommendations.length})
-                      </div>
+                    {/* Full-width Advisory Remediation Section */}
+                    {Array.isArray(result.ai_analysis.remediation_recommendations) && result.ai_analysis.remediation_recommendations.length > 0 && (
+                      <div className="ai-remediation-section">
+                        <div className="ai-panel-label" style={{ marginBottom: '8px' }}>
+                          Advisory Remediation ({result.ai_analysis.remediation_recommendations.length})
+                        </div>
 
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        {result.ai_analysis.remediation_recommendations.map((rec) => (
-                          <div
-                            key={rec.id}
-                            style={{
-                              background: 'var(--bg-surface)',
-                              border: '1px solid var(--border-subtle)',
-                              borderRadius: 'var(--radius-sm)',
-                              padding: '10px 12px',
-                            }}
-                          >
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px', gap: '8px' }}>
-                              <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                                {rec.title}
-                              </span>
-                              <span className="badge badge-outline" style={{ fontSize: '0.64rem', flexShrink: 0 }}>
-                                {rec.action_type.replace(/_/g, ' ')}
-                              </span>
+                        <div className="ai-remediation-list">
+                          {result.ai_analysis.remediation_recommendations.map((rec) => (
+                            <div key={rec.id} className="ai-remediation-card">
+                              <div className="ai-remediation-header">
+                                <div className="ai-remediation-title-group">
+                                  <ShieldAlert size={14} color="#ffffff" style={{ flexShrink: 0 }} />
+                                  <span className="ai-remediation-title">
+                                    {rec.title}
+                                  </span>
+                                </div>
+                                <span className="badge badge-outline ai-remediation-badge">
+                                  {(rec.action_type || 'ADVISORY').replace(/_/g, ' ')}
+                                </span>
+                              </div>
+                              <div className="ai-remediation-explanation">
+                                {rec.explanation}
+                              </div>
+                              {rec.reason && (
+                                <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                                  <span style={{ opacity: 0.8 }}>Justification:</span> {rec.reason}
+                                </div>
+                              )}
+                              <div className="ai-remediation-benefit">
+                                <span style={{ opacity: 0.8 }}>Expected Benefit:</span> {rec.expected_security_benefit}
+                              </div>
                             </div>
-                            <div style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', marginBottom: '4px', lineHeight: 1.4 }}>
-                              {rec.explanation}
-                            </div>
-                            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                              🛡️ Expected Benefit: {rec.expected_security_benefit}
-                            </div>
-                          </div>
-                        ))}
+                          ))}
+                        </div>
                       </div>
+                    )}
+
+                    {/* Usage & Reliability Telemetry */}
+                    {result.ai_analysis.usage && (
+                      <div style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: '12px',
+                        alignItems: 'center',
+                        padding: '8px 12px',
+                        background: 'rgba(255, 255, 255, 0.02)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: 'var(--radius-sm)',
+                        fontSize: '0.72rem',
+                        color: 'var(--text-muted)',
+                      }}>
+                        <span>
+                          <strong style={{ color: 'var(--text-secondary)' }}>Request Model:</strong> 1 shared API call ({result.ai_analysis.usage.operation})
+                        </span>
+                        {result.ai_analysis.usage.prompt_tokens !== null && result.ai_analysis.usage.prompt_tokens !== undefined ? (
+                          <span>
+                            <strong style={{ color: 'var(--text-secondary)' }}>Tokens:</strong> {result.ai_analysis.usage.prompt_tokens} in / {result.ai_analysis.usage.candidates_tokens || 0} out ({result.ai_analysis.usage.total_tokens || 0} total)
+                            {result.ai_analysis.usage.cached_tokens ? ` [${result.ai_analysis.usage.cached_tokens} cached]` : ''}
+                            <span style={{ color: '#10b981', marginLeft: '4px' }}>[Provider Confirmed]</span>
+                          </span>
+                        ) : (
+                          <span>
+                            <strong style={{ color: 'var(--text-secondary)' }}>Tokens:</strong> N/A (0 live tokens consumed)
+                          </span>
+                        )}
+                        {result.ai_analysis.usage.latency_ms !== null && result.ai_analysis.usage.latency_ms !== undefined && (
+                          <span>
+                            <strong style={{ color: 'var(--text-secondary)' }}>Latency:</strong> {(result.ai_analysis.usage.latency_ms / 1000).toFixed(2)}s
+                          </span>
+                        )}
+                        {result.ai_analysis.usage.retries_attempted > 0 && (
+                          <span style={{ color: '#f59e0b' }}>
+                            <strong>Retries:</strong> {result.ai_analysis.usage.retries_attempted}
+                          </span>
+                        )}
+                        {result.ai_analysis.usage.rate_limit_encountered && (
+                          <span style={{ color: '#ef4444' }}>
+                            [429 Rate Limit Encountered]
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Legal/Architectural Invariance Disclaimer */}
+                    <div className="ai-disclaimer-footer">
+                      {result.ai_analysis.disclaimer}
                     </div>
-                  )}
-
-                  {/* Legal/Architectural Invariance Disclaimer */}
-                  <div
-                    style={{
-                      paddingTop: '10px',
-                      borderTop: '1px solid var(--border-subtle)',
-                      fontSize: '0.7rem',
-                      color: 'var(--text-muted)',
-                      fontStyle: 'italic',
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    {result.ai_analysis.disclaimer}
                   </div>
                 </div>
               )}

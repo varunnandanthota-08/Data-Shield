@@ -40,8 +40,10 @@ dist-ssr/
 
 # Environment & Secrets
 .env
+.env.*
 *.env
 !.env.example
+!.env.*.example
 
 # Database & SQLite files
 *.db

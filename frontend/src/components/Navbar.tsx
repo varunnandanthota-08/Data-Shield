@@ -7,14 +7,17 @@ import {
   BookOpen,
   Fingerprint,
   Settings,
+  Users,
+  LogOut,
   Menu,
   X,
   Server,
   Cpu,
 } from 'lucide-react';
 import { HealthCheckResult } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 
-export type SOCTab = 'overview' | 'workbench' | 'history' | 'policies' | 'audit' | 'settings';
+export type SOCTab = 'overview' | 'workbench' | 'history' | 'policies' | 'audit' | 'settings' | 'users';
 
 interface NavbarProps {
   activeTab: SOCTab;
@@ -24,17 +27,21 @@ interface NavbarProps {
 
 export const Navbar: React.FC<NavbarProps> = ({ activeTab, onTabChange, health }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const { user, logout, canScan, canViewAudit, canManageUsers } = useAuth();
   const isOnline = health?.data?.status === 'healthy';
   const isLLMConfigured = health?.data?.environment?.llm_configured ?? false;
 
-  const navItems: { id: SOCTab; label: string; icon: React.ReactNode }[] = [
+  const navItems: { id: SOCTab; label: string; icon: React.ReactNode; hidden?: boolean }[] = [
     { id: 'overview', label: 'Overview', icon: <Activity size={16} strokeWidth={1.8} /> },
-    { id: 'workbench', label: 'Scan Workbench', icon: <Terminal size={16} strokeWidth={1.8} /> },
+    { id: 'workbench', label: 'Scan Workbench', icon: <Terminal size={16} strokeWidth={1.8} />, hidden: !canScan },
     { id: 'history', label: 'Scan History', icon: <History size={16} strokeWidth={1.8} /> },
     { id: 'policies', label: 'Policy Explorer', icon: <BookOpen size={16} strokeWidth={1.8} /> },
-    { id: 'audit', label: 'Audit Trail', icon: <Fingerprint size={16} strokeWidth={1.8} /> },
+    { id: 'audit', label: 'Audit Trail', icon: <Fingerprint size={16} strokeWidth={1.8} />, hidden: !canViewAudit },
+    { id: 'users', label: 'Identity & RBAC', icon: <Users size={16} strokeWidth={1.8} />, hidden: !canManageUsers },
     { id: 'settings', label: 'Settings & Health', icon: <Settings size={16} strokeWidth={1.8} /> },
   ];
+
+  const visibleNavItems = navItems.filter((i) => !i.hidden);
 
   const handleNavClick = (id: SOCTab) => {
     onTabChange(id);
@@ -183,7 +190,7 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, onTabChange, health }
 
           {/* Nav Items List */}
           <nav style={{ display: 'flex', flexDirection: 'column', gap: '2px', padding: '0 10px' }}>
-            {navItems.map((item) => {
+            {visibleNavItems.map((item) => {
               const isActive = activeTab === item.id;
               return (
                 <button
@@ -220,7 +227,7 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, onTabChange, health }
           </nav>
         </div>
 
-        {/* Bottom Status Area */}
+        {/* Bottom Section: Authenticated User & Telemetry */}
         <div
           style={{
             padding: '16px 16px 20px',
@@ -230,6 +237,94 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, onTabChange, health }
             gap: '10px',
           }}
         >
+          {/* User Identity Card */}
+          {user && (
+            <div
+              style={{
+                padding: '8px 10px',
+                borderRadius: 'var(--radius-sm)',
+                background: '#161616',
+                border: '1px solid var(--border-strong)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: '4px',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                <div
+                  style={{
+                    width: '26px',
+                    height: '26px',
+                    borderRadius: '50%',
+                    background: '#242424',
+                    border: '1px solid var(--border-subtle)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '0.7rem',
+                    fontWeight: 700,
+                    color: 'var(--text-secondary)',
+                    flexShrink: 0,
+                  }}
+                >
+                  {user.username.substring(0, 2).toUpperCase()}
+                </div>
+                <div style={{ minWidth: 0, overflow: 'hidden' }}>
+                  <div
+                    style={{
+                      fontWeight: 600,
+                      fontSize: '0.78rem',
+                      color: 'var(--text-primary)',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                  >
+                    {user.username}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: '0.64rem',
+                      color:
+                        user.role === 'admin'
+                          ? '#f87171'
+                          : user.role === 'analyst'
+                          ? '#60a5fa'
+                          : '#9ca3af',
+                      fontWeight: 700,
+                      letterSpacing: '0.04em',
+                      textTransform: 'uppercase',
+                    }}
+                  >
+                    {user.role}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                id="btn-sign-out"
+                onClick={() => logout()}
+                title="Sign Out"
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: 'var(--text-muted)',
+                  cursor: 'pointer',
+                  padding: '4px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  borderRadius: 'var(--radius-xs)',
+                  transition: 'color 120ms ease',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = '#ef4444')}
+                onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}
+              >
+                <LogOut size={15} />
+              </button>
+            </div>
+          )}
+
           <div
             style={{
               fontSize: '0.66rem',

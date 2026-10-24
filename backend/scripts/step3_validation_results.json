@@ -1,0 +1,164 @@
+[
+  {
+    "scenario": "Scenario 1: Clean Internal Text",
+    "scan_id": "scan_1792768596394_21979d1fe9",
+    "deterministic_decision": "ALLOW",
+    "risk_score": 8,
+    "risk_band": "LOW",
+    "findings_detected": 0,
+    "triggered_policy_ids": [
+      "POL-005"
+    ],
+    "gemini_status": "SUCCESS",
+    "model_identifier": "gemini-3.1-flash-lite",
+    "is_ai_assisted": true,
+    "num_policy_rationales": 1,
+    "num_remediations": 1,
+    "num_risk_factors": 3,
+    "num_ambiguities": 1,
+    "duration_ms": 2783.84,
+    "meaningful_output": true,
+    "pids_valid": true,
+    "decision_authoritative": true,
+    "raw_text_leaked_in_audit": false,
+    "summary_preview": "An internal employee transferred sprint retrospective notes containing technical refactoring details to an internal serv",
+    "ambiguities_list": [
+      "None identified; the transfer context and document content are consistent with internal sprint documentation."
+    ],
+    "remediation_actions": [
+      "LIMIT_AUTHORIZED_RECIPIENTS"
+    ]
+  },
+  {
+    "scenario": "Scenario 2: Single Email to External SaaS",
+    "scan_id": "scan_1792768599165_66339c7a66",
+    "deterministic_decision": "REQUIRE_APPROVAL",
+    "risk_score": 52,
+    "risk_band": "MEDIUM",
+    "findings_detected": 1,
+    "triggered_policy_ids": [
+      "POL-002",
+      "POL-003"
+    ],
+    "gemini_status": "SUCCESS",
+    "model_identifier": "gemini-3.1-flash-lite",
+    "is_ai_assisted": true,
+    "num_policy_rationales": 2,
+    "num_remediations": 2,
+    "num_risk_factors": 3,
+    "num_ambiguities": 2,
+    "duration_ms": 19535.9,
+    "meaningful_output": true,
+    "pids_valid": true,
+    "decision_authoritative": true,
+    "raw_text_leaked_in_audit": false,
+    "summary_preview": "An attempt was made to transfer a document containing a PII email address to an external SaaS platform for vendor coordi",
+    "ambiguities_list": [
+      "The specific SaaS platform's data retention policy is not defined in the current context.",
+      "The necessity of the email address for the specific vendor coordination task is not verified."
+    ],
+    "remediation_actions": [
+      "REDACT_SENSITIVE_VALUES",
+      "REQUEST_HUMAN_REVIEW"
+    ]
+  },
+  {
+    "scenario": "Scenario 3: Synthetic API Key to Public LLM",
+    "scan_id": "scan_1792768618719_2b55fc094d",
+    "deterministic_decision": "BLOCK",
+    "risk_score": 90,
+    "risk_band": "CRITICAL",
+    "findings_detected": 1,
+    "triggered_policy_ids": [
+      "POL-001",
+      "POL-003"
+    ],
+    "gemini_status": "SUCCESS",
+    "model_identifier": "gemini-3.1-flash-lite",
+    "is_ai_assisted": true,
+    "num_policy_rationales": 2,
+    "num_remediations": 2,
+    "num_risk_factors": 3,
+    "num_ambiguities": 1,
+    "duration_ms": 3653.8,
+    "meaningful_output": true,
+    "pids_valid": true,
+    "decision_authoritative": true,
+    "raw_text_leaked_in_audit": false,
+    "summary_preview": "A critical security incident occurred where a confidential OpenAI API key was detected in a document intended for a publ",
+    "ambiguities_list": [
+      "The specific scope of access associated with the leaked API key is not fully defined in the metadata."
+    ],
+    "remediation_actions": [
+      "ROTATE_CREDENTIAL",
+      "RESTRICT_PUBLIC_SHARING"
+    ]
+  },
+  {
+    "scenario": "Scenario 4: Multi-Entity Payload (Email + SSN + Payment Card + Key)",
+    "scan_id": "scan_1792768622388_e471b65ff0",
+    "deterministic_decision": "BLOCK",
+    "risk_score": 100,
+    "risk_band": "CRITICAL",
+    "findings_detected": 3,
+    "triggered_policy_ids": [
+      "POL-001",
+      "POL-002",
+      "POL-003"
+    ],
+    "gemini_status": "SUCCESS",
+    "model_identifier": "gemini-3.1-flash-lite",
+    "is_ai_assisted": true,
+    "num_policy_rationales": 3,
+    "num_remediations": 3,
+    "num_risk_factors": 3,
+    "num_ambiguities": 2,
+    "duration_ms": 3602.19,
+    "meaningful_output": true,
+    "pids_valid": true,
+    "decision_authoritative": true,
+    "raw_text_leaked_in_audit": false,
+    "summary_preview": "A staging analyst attempted to transmit a document containing PII, payment card data, and AWS credentials to a public LL",
+    "ambiguities_list": [
+      "The specific business justification for using a public LLM for sensitive customer migration data is unclear.",
+      "The authorization level of the staging_analyst account to access these specific production-level credentials is not defined."
+    ],
+    "remediation_actions": [
+      "REDACT_SENSITIVE_VALUES",
+      "ROTATE_CREDENTIAL",
+      "RESTRICT_PUBLIC_SHARING"
+    ]
+  },
+  {
+    "scenario": "Scenario 5: Missing / Ambiguous Metadata Context",
+    "scan_id": "scan_1792768626008_aa31211b25",
+    "deterministic_decision": "REQUIRE_APPROVAL",
+    "risk_score": 48,
+    "risk_band": "MEDIUM",
+    "findings_detected": 1,
+    "triggered_policy_ids": [
+      "POL-004"
+    ],
+    "gemini_status": "SUCCESS",
+    "model_identifier": "gemini-3.1-flash-lite",
+    "is_ai_assisted": true,
+    "num_policy_rationales": 1,
+    "num_remediations": 2,
+    "num_risk_factors": 3,
+    "num_ambiguities": 2,
+    "duration_ms": 6523.47,
+    "meaningful_output": true,
+    "pids_valid": true,
+    "decision_authoritative": true,
+    "raw_text_leaked_in_audit": false,
+    "summary_preview": "A staging analyst attempted to transfer a document containing PII (email address) to an unspecified destination without ",
+    "ambiguities_list": [
+      "The destination of the data transfer is currently unknown.",
+      "The specific business purpose for the data export is not documented."
+    ],
+    "remediation_actions": [
+      "REDACT_SENSITIVE_VALUES",
+      "REQUEST_HUMAN_REVIEW"
+    ]
+  }
+]

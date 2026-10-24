@@ -3,10 +3,12 @@ import {
   fetchSOCMetrics,
   fetchScanRecords,
   verifyAuditChain,
+  getAuthToken,
   SOCMetrics,
   ScanRecordItem,
   AuditVerificationResult,
 } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import {
   ShieldAlert,
   Fingerprint,
@@ -28,6 +30,7 @@ interface OverviewDashboardProps {
 }
 
 export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({ onNavigate }) => {
+  const { token } = useAuth();
   const [metrics, setMetrics] = useState<SOCMetrics | null>(null);
   const [recentScans, setRecentScans] = useState<ScanRecordItem[]>([]);
   const [auditStatus, setAuditStatus] = useState<AuditVerificationResult | null>(null);
@@ -37,6 +40,10 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({ onNavigate
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
 
   const loadDashboardData = useCallback(async () => {
+    const activeToken = token || getAuthToken();
+    if (!activeToken) {
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -54,11 +61,13 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({ onNavigate
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [token]);
 
   useEffect(() => {
-    loadDashboardData();
-  }, [loadDashboardData]);
+    if (token || getAuthToken()) {
+      loadDashboardData();
+    }
+  }, [token, loadDashboardData]);
 
   const handleVerifyChain = async () => {
     setVerifyingChain(true);

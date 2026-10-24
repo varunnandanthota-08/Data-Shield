@@ -126,6 +126,7 @@ class AuditEvent(BaseModel):
     sanitized_metadata: Dict[str, Any] = Field(default_factory=dict)
     prev_event_hash: str
     event_hash: str
+    org_id: str = "default"
 
 
 class AuditVerificationResult(BaseModel):

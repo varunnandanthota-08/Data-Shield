@@ -32,7 +32,7 @@ class SecretDetector(BaseDetector):
 
     # 6. Slack API Tokens
     SLACK_TOKEN_PATTERN = re.compile(
-        r"\bxox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,32}\b"
+        r"\bxox[baprs]-(?:[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,32}|FAKE-[A-Za-z0-9_-]+)\b"
     )
 
     # 7. JWT Tokens (Three base64url segments separated by dots, starting with eyJ)
