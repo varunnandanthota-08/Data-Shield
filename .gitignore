@@ -55,6 +55,9 @@ dist-ssr/
 *.sqlite-shm
 *.sqlite-wal
 *.sqlite-journal
+*.bak
+*.backup
+backups/
 
 # IDE
 .vscode/
