@@ -69,10 +69,7 @@ DEFAULT_POLICIES: List[PolicyRule] = [
             DestinationType.PUBLIC_LLM,
             DestinationType.EXTERNAL_SAAS,
         ],
-        target_recipients=[
-            RecipientType.PUBLIC,
-            RecipientType.THIRD_PARTY_CONTRACTOR,
-        ],
+        target_recipients=[],
         action=PolicyAction.WARN,
         priority=60,
         intent_explanation="Maintains user security awareness of corporate confidentiality boundaries during external data interactions.",

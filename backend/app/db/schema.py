@@ -196,3 +196,19 @@ def init_db(db_path: Optional[str] = None) -> None:
                         now_iso,
                     ),
                 )
+
+        # 7. Idempotent reconciliation of baseline POL-003 recipient boundary
+        cursor.execute("SELECT target_recipients FROM policies WHERE id = 'POL-003' AND org_id = 'default'")
+        pol3_row = cursor.fetchone()
+        if pol3_row:
+            try:
+                recips = json.loads(pol3_row["target_recipients"])
+                # If it still contains the legacy restricted recipient list, update to hardened []
+                if recips == ["PUBLIC", "THIRD_PARTY_CONTRACTOR"]:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    cursor.execute(
+                        "UPDATE policies SET target_recipients = ?, updated_at = ? WHERE id = 'POL-003' AND org_id = 'default'",
+                        (json.dumps([]), now_iso),
+                    )
+            except Exception:
+                pass

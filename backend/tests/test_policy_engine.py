@@ -98,6 +98,124 @@ class TestPolicyEngineMatchingAndPrecedence:
         assert result.final_decision == PolicyAction.WARN
         assert any(p.id == "POL-003" for p in result.triggered_policies)
 
+    def test_pol003_warns_on_confidential_to_external_saas_all_recipients(self):
+        """POL-003 perimeter hardening: CONFIDENTIAL content to EXTERNAL_SAAS triggers
+        WARN across all recipient types (INTERNAL_EMPLOYEE, PUBLIC, THIRD_PARTY_CONTRACTOR).
+        """
+        engine = PolicyEngine()
+        for recipient in [
+            RecipientType.INTERNAL_EMPLOYEE,
+            RecipientType.PUBLIC,
+            RecipientType.THIRD_PARTY_CONTRACTOR,
+        ]:
+            ctx = SharingContext(
+                destination=DestinationType.EXTERNAL_SAAS,
+                recipient=recipient,
+                classification=DataClassification.CONFIDENTIAL,
+            )
+            result = engine.evaluate([], ctx)
+            assert result.final_decision == PolicyAction.WARN, f"Failed for recipient {recipient.value}"
+            assert any(p.id == "POL-003" for p in result.triggered_policies)
+
+    def test_pol003_warns_on_restricted_classification_to_external_destinations(self):
+        """POL-003 perimeter hardening: RESTRICTED content sent to external destinations
+        (EXTERNAL_SAAS, PUBLIC_LLM) triggers WARN for internal, public, and contractor recipients.
+        """
+        engine = PolicyEngine()
+        for dest in [DestinationType.EXTERNAL_SAAS, DestinationType.PUBLIC_LLM]:
+            for recipient in [
+                RecipientType.INTERNAL_EMPLOYEE,
+                RecipientType.PUBLIC,
+                RecipientType.THIRD_PARTY_CONTRACTOR,
+            ]:
+                ctx = SharingContext(
+                    destination=dest,
+                    recipient=recipient,
+                    classification=DataClassification.RESTRICTED,
+                )
+                result = engine.evaluate([], ctx)
+                assert result.final_decision == PolicyAction.WARN, f"Failed for {dest.value} with {recipient.value}"
+                assert any(p.id == "POL-003" for p in result.triggered_policies)
+
+    def test_pol003_precedence_preservation_with_higher_actions(self):
+        """Precedence invariant: BLOCK > REQUIRE_APPROVAL > REDACT > WARN > ALLOW.
+        When POL-003 triggers WARN, higher precedence rules must strictly win.
+        """
+        engine = PolicyEngine()
+
+        # 1. Secret to PUBLIC_LLM triggers POL-001 (BLOCK) and POL-003 (WARN) -> BLOCK must win
+        secret_finding = create_dummy_finding(FindingCategory.SECRET, SeverityLevel.CRITICAL)
+        ctx_secret = SharingContext(
+            destination=DestinationType.PUBLIC_LLM,
+            recipient=RecipientType.INTERNAL_EMPLOYEE,
+            classification=DataClassification.CONFIDENTIAL,
+        )
+        res_secret = engine.evaluate([secret_finding], ctx_secret)
+        assert res_secret.final_decision == PolicyAction.BLOCK
+        assert res_secret.hard_block_enforced is True
+        assert any(p.id == "POL-001" for p in res_secret.triggered_policies)
+        assert any(p.id == "POL-003" for p in res_secret.triggered_policies)
+
+        # 2. PII to EXTERNAL_SAAS with PUBLIC recipient triggers POL-002 (REQUIRE_APPROVAL) and POL-003 (WARN) -> REQUIRE_APPROVAL must win
+        pii_finding = create_dummy_finding(FindingCategory.PII, SeverityLevel.HIGH)
+        ctx_pii = SharingContext(
+            destination=DestinationType.EXTERNAL_SAAS,
+            recipient=RecipientType.PUBLIC,
+            classification=DataClassification.CONFIDENTIAL,
+        )
+        res_pii = engine.evaluate([pii_finding], ctx_pii)
+        assert res_pii.final_decision == PolicyAction.REQUIRE_APPROVAL
+        assert any(p.id == "POL-002" for p in res_pii.triggered_policies)
+        assert any(p.id == "POL-003" for p in res_pii.triggered_policies)
+
+    def test_pol003_db_schema_reconciliation(self, tmp_path):
+        """Tests that init_db() idempotently reconciles legacy POL-003 records in SQLite
+        without overwriting custom tenant policies or other baseline rules.
+        """
+        import json
+        import sqlite3
+        from app.db.schema import init_db
+        from app.db.repository import PolicyRepository
+
+        db_file = str(tmp_path / "test_pol003_recon.db")
+
+        # 1. First init creates and seeds fresh tables with hardened POL-003
+        init_db(db_file)
+        repo = PolicyRepository(db_path=db_file)
+        rules = repo.list_policies()
+        pol3 = next(r for r in rules if r.id == "POL-003" and r.org_id == "default")
+        assert pol3.target_recipients == []
+
+        # 2. Simulate legacy database with old restricted recipient list
+        conn = sqlite3.connect(db_file)
+        conn.execute(
+            "UPDATE policies SET target_recipients = ? WHERE id = 'POL-003' AND org_id = 'default'",
+            (json.dumps(["PUBLIC", "THIRD_PARTY_CONTRACTOR"]),),
+        )
+        # Also insert a custom tenant policy that must NOT be touched
+        conn.execute(
+            """
+            INSERT INTO policies (
+                id, org_id, version, name, description, enabled, action, priority,
+                applicable_categories, applicable_sensitivities,
+                target_destinations, target_recipients, intent_explanation,
+                created_at, updated_at
+            ) VALUES ('POL-CUSTOM-001', 'org_custom', '1.0.0', 'Custom Tenant Rule', 'custom', 1, 'BLOCK', 99, '[]', '[]', '[]', '["INTERNAL_EMPLOYEE"]', 'custom', '2026-01-01', '2026-01-01')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        # 3. Running init_db() reconciles POL-003 to [] and preserves custom tenant policy
+        init_db(db_file)
+        updated_rules = repo.list_policies()
+        reconciled_pol3 = next(r for r in updated_rules if r.id == "POL-003" and r.org_id == "default")
+        assert reconciled_pol3.target_recipients == []
+
+        custom_rule = next(r for r in updated_rules if r.id == "POL-CUSTOM-001")
+        assert [r.value for r in custom_rule.target_recipients] == ["INTERNAL_EMPLOYEE"]
+
+
     def test_pol005_allows_clean_low_risk_internal_content(self):
         engine = PolicyEngine()
         ctx = SharingContext(
