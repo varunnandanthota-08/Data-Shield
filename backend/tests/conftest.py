@@ -20,6 +20,7 @@ def manage_auth_overrides(request):
         or "test_production_security_hardening" in request.node.nodeid
         or "test_phase5_e2e_acceptance" in request.node.nodeid
         or "test_auth_registration" in request.node.nodeid
+        or "test_ai_usage_budgets" in request.node.nodeid
     ):
         # Do not override auth dependencies for dedicated security testing suites
         app.dependency_overrides.pop(get_current_user, None)

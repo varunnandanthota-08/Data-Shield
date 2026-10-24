@@ -84,6 +84,16 @@ CREATE TABLE IF NOT EXISTS auth_rate_limits (
     updated_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ai_budget_usage (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    org_id TEXT NOT NULL,
+    timestamp REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    scan_id TEXT,
+    status TEXT NOT NULL DEFAULT 'RESERVED'
+);
+
 CREATE INDEX IF NOT EXISTS idx_audit_seq ON audit_events(sequence_number);
 CREATE INDEX IF NOT EXISTS idx_audit_scan ON audit_events(scan_id);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
@@ -92,6 +102,10 @@ CREATE INDEX IF NOT EXISTS idx_users_org ON users(org_id);
 CREATE INDEX IF NOT EXISTS idx_revoked_tokens_user ON revoked_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_revoked_tokens_exp ON revoked_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_rate_limits_locked ON auth_rate_limits(locked_until);
+CREATE INDEX IF NOT EXISTS idx_ai_budget_user_time ON ai_budget_usage(user_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_ai_budget_org_time ON ai_budget_usage(org_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_ai_budget_time ON ai_budget_usage(timestamp);
+CREATE INDEX IF NOT EXISTS idx_ai_budget_scan ON ai_budget_usage(scan_id);
 """
 
 
@@ -127,6 +141,27 @@ def init_db(db_path: Optional[str] = None) -> None:
         user_cols = [c["name"] for c in cursor.fetchall()]
         if "tokens_revoked_before" not in user_cols:
             cursor.execute("ALTER TABLE users ADD COLUMN tokens_revoked_before TEXT")
+
+        # 6. Idempotent check for ai_budget_usage table and indexes
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_budget_usage'")
+        if not cursor.fetchone():
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ai_budget_usage (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    org_id TEXT NOT NULL,
+                    timestamp REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    scan_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'RESERVED'
+                )
+                """
+            )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_budget_user_time ON ai_budget_usage(user_id, timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_budget_org_time ON ai_budget_usage(org_id, timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_budget_time ON ai_budget_usage(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_budget_scan ON ai_budget_usage(scan_id)")
 
         # Check if policies exist; if not, seed default policies
         cursor.execute("SELECT COUNT(*) AS cnt FROM policies")

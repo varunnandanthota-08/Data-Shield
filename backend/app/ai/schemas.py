@@ -43,6 +43,8 @@ class AIUsageTelemetry(BaseModel):
     fallback_reason: Optional[str] = Field(default=None, description="Sanitized reason for deterministic fallback if triggered")
     provider_status: str = Field(default="SUCCESS", description="Provider call status: SUCCESS, FALLBACK, or UNAVAILABLE")
     provider_response_id: Optional[str] = Field(default=None, description="Safe provider-assigned response identifier if available")
+    budget_exhausted: bool = Field(default=False, description="Whether Gemini call was skipped due to exhausted daily AI usage budget")
+    budget_scope: Optional[str] = Field(default=None, description="Scope of exhausted budget: 'user', 'tenant', or 'tenant_hard_ceiling'")
 
 
 class AIContextAnalysisResult(BaseModel):

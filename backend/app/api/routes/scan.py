@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from pydantic import BaseModel
 from app.audit.service import audit_service
 from app.auth.dependencies import require_analyst_or_admin, require_authenticated
-from app.auth.models import UserResponse
+from app.auth.models import UserResponse, UserRole
 from app.auth.rate_limiter import scan_rate_limiter
 from app.db.connection import get_db_cursor
 from app.db.repository import scan_record_repo
@@ -34,6 +34,7 @@ async def _execute_scan_pipeline(
     ctx: SharingContext,
     scan_options: ScanOptions,
     source_meta: Optional[Dict[str, Any]] = None,
+    user_id: Optional[str] = None,
 ) -> ScanResponse:
     """Core deterministic scanning, policy evaluation, risk scoring, AI context analysis,
     and atomic SHA-256 chained audit persistence. Shared by both text and file endpoints.
@@ -95,6 +96,8 @@ async def _execute_scan_pipeline(
         context=ctx,
         policy_result=policy_res,
         risk_result=risk_res,
+        user_id=user_id,
+        scan_id=scan_res.scan_id,
     )
 
     # 5. Prepare sanitized audit metadata (Zero raw secrets, unredacted documents, or prompts stored)
@@ -155,6 +158,8 @@ async def _execute_scan_pipeline(
             "timeout_encountered": ai_result.usage.timeout_encountered if ai_result.usage else False,
             "error_type": ai_result.usage.error_type if ai_result.usage else None,
             "fallback_reason": ai_result.usage.fallback_reason if ai_result.usage else None,
+            "budget_exhausted": getattr(ai_result.usage, "budget_exhausted", False) if ai_result.usage else False,
+            "budget_scope": getattr(ai_result.usage, "budget_scope", None) if ai_result.usage else None,
             "recommendation_count": len(ai_result.remediation_recommendations),
             "recommendation_ids": [r.id for r in ai_result.remediation_recommendations],
             "human_review_recommended": ai_result.human_review_recommended,
@@ -254,6 +259,7 @@ async def scan_text_payload(
         ctx=ctx,
         scan_options=scan_options,
         source_meta={"source_type": "text"},
+        user_id=current_user.id,
     )
 
 
@@ -377,6 +383,7 @@ async def scan_file_payload(
         ctx=ctx,
         scan_options=scan_options,
         source_meta=source_meta,
+        user_id=current_user.id,
     )
 
 
@@ -467,3 +474,23 @@ async def get_soc_metrics(
 ) -> Dict[str, Any]:
     user_org = current_user.org_id if current_user.org_id != "default" else None
     return scan_record_repo.get_metrics(org_id=user_org)
+
+
+@router.get(
+    "/ai-budget",
+    response_model=Dict[str, Any],
+    summary="Get Daily AI Advisory Usage Budget Status",
+    description="Returns authenticated rolling 24-hour Gemini advisory usage, remaining quota, and reset window. Accessible to authenticated users with strict tenant isolation.",
+)
+async def get_ai_budget_status(
+    current_user: UserResponse = Depends(require_authenticated),
+) -> Dict[str, Any]:
+    from app.ai.budget import ai_budget_service
+    target_org = current_user.org_id
+    summary = ai_budget_service.get_usage_summary(
+        user_id=current_user.id,
+        org_id=target_org,
+    )
+    if current_user.role == UserRole.ADMIN:
+        summary["user_breakdown"] = ai_budget_service.get_tenant_user_breakdown(org_id=target_org)
+    return summary

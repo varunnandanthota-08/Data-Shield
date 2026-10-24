@@ -51,9 +51,11 @@ class GeminiContextAnalysisService:
         context: SharingContext,
         policy_result: PolicyEvaluationResult,
         risk_result: RiskScoreResult,
+        user_id: Optional[str] = None,
+        scan_id: Optional[str] = None,
     ) -> AIContextAnalysisResult:
         """Analyzes transfer context and generates structured explanations and least-privilege remediations.
-        Fails safely to deterministic fallback if Gemini is unconfigured, times out, or errors.
+        Fails safely to deterministic fallback if Gemini is unconfigured, budget is exhausted, times out, or errors.
         """
         # 1. Check if model is configured
         if not self.is_configured:
@@ -68,7 +70,37 @@ class GeminiContextAnalysisService:
                 api_calls_count=0,
             )
 
-        # 2. Privacy verification: Ensure input is safely masked before sending
+        # 2. Check and reserve rolling 24-hour daily AI usage budget
+        if settings.AI_BUDGET_ENABLED:
+            effective_user_id = user_id or context.actor_id or "default_user"
+            effective_org_id = context.org_id or "default"
+            from app.ai.budget import ai_budget_service
+            budget_res = ai_budget_service.check_and_reserve(
+                user_id=effective_user_id,
+                org_id=effective_org_id,
+                scan_id=scan_id,
+            )
+            if not budget_res.allowed:
+                logger.info(
+                    "Skipping Gemini call: %s for user '%s' in tenant '%s'",
+                    budget_res.reason,
+                    effective_user_id,
+                    effective_org_id,
+                )
+                return generate_deterministic_explanation(
+                    findings=findings,
+                    context=context,
+                    policy_result=policy_result,
+                    risk_result=risk_result,
+                    failure_reason=budget_res.reason or "AI usage budget exhausted",
+                    latency_ms=0.0,
+                    retries_attempted=0,
+                    api_calls_count=0,
+                    budget_exhausted=True,
+                    budget_scope=budget_res.exhausted_scope,
+                )
+
+        # 3. Privacy verification: Ensure input is safely masked before sending
         if not verify_sanitization(sanitized_text, findings):
             return generate_deterministic_explanation(
                 findings=findings,

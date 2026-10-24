@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     AI_BUDGET_ENABLED: bool = True
     AI_BUDGET_USER_DAILY_LIMIT: int = 200
     AI_BUDGET_TENANT_DAILY_LIMIT: int = 2500
+    AI_BUDGET_TENANT_HARD_CEILING: int = 5000  # Non-overridable upper safety bound per tenant
     AI_BUDGET_WINDOW_SECONDS: int = 86400  # Rolling 24 hours
     COOKIE_SECURE: Optional[bool] = None  # None auto-enables in production, allows explicit False in dev
     COOKIE_SAMESITE: str = "lax"
@@ -57,6 +58,7 @@ class Settings(BaseSettings):
     @field_validator(
         "AI_BUDGET_USER_DAILY_LIMIT",
         "AI_BUDGET_TENANT_DAILY_LIMIT",
+        "AI_BUDGET_TENANT_HARD_CEILING",
         "AI_BUDGET_WINDOW_SECONDS",
         mode="after",
     )
@@ -67,6 +69,25 @@ class Settings(BaseSettings):
                 f"Daily AI budget configuration error: Value must be a positive integer (> 0), got {v}."
             )
         return v
+
+    @model_validator(mode="after")
+    def validate_budget_hierarchy(self) -> "Settings":
+        """Enforces that individual user limits do not exceed tenant limits,
+        and tenant operational limits do not exceed the tenant hard ceiling.
+        """
+        if self.AI_BUDGET_TENANT_DAILY_LIMIT > self.AI_BUDGET_TENANT_HARD_CEILING:
+            raise ValueError(
+                f"Daily AI budget configuration error: Configured AI_BUDGET_TENANT_DAILY_LIMIT "
+                f"({self.AI_BUDGET_TENANT_DAILY_LIMIT}) cannot exceed tenant hard ceiling "
+                f"AI_BUDGET_TENANT_HARD_CEILING ({self.AI_BUDGET_TENANT_HARD_CEILING})."
+            )
+        if self.AI_BUDGET_USER_DAILY_LIMIT > self.AI_BUDGET_TENANT_DAILY_LIMIT:
+            raise ValueError(
+                f"Daily AI budget configuration error: AI_BUDGET_USER_DAILY_LIMIT "
+                f"({self.AI_BUDGET_USER_DAILY_LIMIT}) cannot exceed tenant daily limit "
+                f"AI_BUDGET_TENANT_DAILY_LIMIT ({self.AI_BUDGET_TENANT_DAILY_LIMIT})."
+            )
+        return self
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
