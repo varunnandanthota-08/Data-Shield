@@ -47,8 +47,14 @@ dist-ssr/
 
 # Database & SQLite files
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
 
 # IDE
 .vscode/
